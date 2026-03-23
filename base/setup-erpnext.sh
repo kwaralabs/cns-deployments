@@ -3,34 +3,43 @@
 #
 #  ERPNext v16 — Production Setup via Frappe Docker
 #
-#  Tested: March 2026, Ubuntu 24.04 LTS, Contabo VPS
+#  Tested & verified: March 23, 2026 — Ubuntu 24.04 LTS, Contabo VPS
 #  Reference: https://github.com/frappe/frappe_docker
 #             docs/single-server-example.md
 #
 #  Architecture:
 #    Traefik (central reverse proxy + Let's Encrypt)
-#      └── MariaDB (shared database)
-#      └── ERPNext Bench (per-client: backend, frontend, redis, workers)
+#      ├── MariaDB (shared database)
+#      └── ERPNext Bench (backend, frontend, redis, workers, scheduler)
 #
-#  Key design decisions (learned the hard way):
+#  Key design decisions (each learned from a production failure):
 #
 #    1. compose.yaml is NEVER edited.
 #       It reads CUSTOM_IMAGE, CUSTOM_TAG, PULL_POLICY from env vars.
+#       Previous attempt: patching with Python → corrupted YAML.
 #
-#    2. example.env contains SITES_RULE=Host(`erp.example.com`).
-#       This is what Traefik uses for routing. It MUST be sed-replaced.
+#    2. SITES_RULE MUST be sed-replaced in example.env.
+#       This is what Traefik uses for Host() routing rules.
+#       Previous attempt: only set SITES, not SITES_RULE → Traefik 404.
 #
-#    3. SITES, ROUTER, BENCH_NETWORK do NOT exist in example.env.
-#       They must be APPENDED with echo >>.
+#    3. SITES, ROUTER, BENCH_NETWORK must be APPENDED.
+#       They do not exist in example.env. sed cannot replace them.
+#       Previous attempt: sed on nonexistent line → silently failed.
 #
-#    4. Traefik password hashes contain $ signs.
-#       Docker Compose interprets $ as variables — escape as $$.
+#    4. Traefik password $$ escaping.
+#       openssl passwd output contains $ which Docker Compose reads
+#       as variable interpolation. Must escape $ as $$.
+#       Previous attempt: unescaped → "apr1 variable is not set" warnings.
 #
-#    5. --no-mariadb-socket is deprecated in Frappe v16.
-#       Use --mariadb-user-host-login-scope='%' instead.
+#    5. --mariadb-user-host-login-scope='%' replaces --no-mariadb-socket.
+#       The old flag is deprecated in Frappe v16.
 #
 #    6. Python/Node build args are omitted.
 #       The Containerfile has correct defaults per branch.
+#       Previous attempt: Python 3.14.3 / Node 24.13.1 → don't exist.
+#
+#    7. Cron install uses simple echo|crontab, not piped crontab -l.
+#       Piped approach crashes under set -euo pipefail on fresh users.
 #
 #  USAGE:
 #    1. Point DNS A record to your server IP
@@ -239,7 +248,6 @@ step "PHASE 8: Deploy ERPNext bench"
 
 cd "${FRAPPE_HOME}/frappe_docker"
 
-# --- Build the env file ---
 log "Creating bench env file..."
 curl -sL https://raw.githubusercontent.com/frappe/frappe_docker/main/example.env -o "$ENV_FILE"
 
@@ -260,7 +268,6 @@ PULL_POLICY=never
 EOF
 chown "${FRAPPE_USER}:${FRAPPE_USER}" "$ENV_FILE"
 
-# --- Verify ---
 log "Verifying env file..."
 grep -q "DB_HOST=mariadb-database"              "$ENV_FILE" || err "DB_HOST not set"
 grep -q "SITES_RULE=Host(\`${SITE_DOMAIN}\`)"   "$ENV_FILE" || err "SITES_RULE not set"
@@ -271,7 +278,6 @@ grep -q "CUSTOM_IMAGE=${IMAGE_NAME}"             "$ENV_FILE" || err "CUSTOM_IMAG
 grep -q "PULL_POLICY=never"                      "$ENV_FILE" || err "PULL_POLICY not set"
 log "Env file verified."
 
-# --- Generate resolved compose YAML ---
 log "Generating resolved compose file..."
 docker compose --project-name "${PROJECT_NAME}" \
   --env-file "$ENV_FILE" \
@@ -281,14 +287,12 @@ docker compose --project-name "${PROJECT_NAME}" \
   -f overrides/compose.multi-bench-ssl.yaml \
   config > "$YAML_FILE"
 
-# --- Critical checks ---
 grep -q "erp.example.com" "$YAML_FILE" && err "FATAL: YAML still has erp.example.com"
 grep -q "${SITE_DOMAIN}"  "$YAML_FILE" || err "FATAL: YAML missing ${SITE_DOMAIN}"
 grep -q "${IMAGE_NAME}:${IMAGE_TAG}" "$YAML_FILE" || err "FATAL: YAML wrong image"
 log "Verified: domain=${SITE_DOMAIN}, image=${IMAGE_NAME}:${IMAGE_TAG}"
 chown "${FRAPPE_USER}:${FRAPPE_USER}" "$YAML_FILE"
 
-# --- Start ---
 log "Starting ERPNext bench..."
 docker compose --project-name "${PROJECT_NAME}" -f "$YAML_FILE" up -d
 
@@ -349,9 +353,8 @@ chown "${FRAPPE_USER}:${FRAPPE_USER}" "${FRAPPE_HOME}/scripts/backup-${PROJECT_N
 chmod +x "${FRAPPE_HOME}/scripts/backup-${PROJECT_NAME}.sh"
 log "Backup script created."
 
-# Install cron — use || true because crontab -l fails on empty crontab
-CRON_LINE="0 2 * * * ${FRAPPE_HOME}/scripts/backup-${PROJECT_NAME}.sh >> ${FRAPPE_HOME}/logs/backup-${PROJECT_NAME}.log 2>&1"
-( (sudo -u "$FRAPPE_USER" crontab -l 2>/dev/null || true) | grep -v "backup-${PROJECT_NAME}"; echo "$CRON_LINE") | sudo -u "$FRAPPE_USER" crontab -
+# Install cron — simple approach that works with set -euo pipefail on fresh users
+sudo -u "$FRAPPE_USER" bash -c "echo '0 2 * * * ${FRAPPE_HOME}/scripts/backup-${PROJECT_NAME}.sh >> ${FRAPPE_HOME}/logs/backup-${PROJECT_NAME}.log 2>&1' | crontab -"
 log "Backup cron installed (daily 2:00 AM)."
 
 ###############################################################################
@@ -406,7 +409,7 @@ echo ""
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "308" ]; then
   log "All checks passed!"
-  log "SSL cert will be issued in 1-2 minutes."
+  log "SSL certificate will be issued in 1-2 minutes."
   log "Open https://${SITE_DOMAIN}"
 else
   warn "HTTP ${HTTP_CODE}. Debug with:"
@@ -429,12 +432,4 @@ echo "  ~/scripts/backup-${PROJECT_NAME}.sh"
 echo ""
 echo "  # Shell into bench"
 echo "  docker compose --project-name ${PROJECT_NAME} -f ~/gitops/${PROJECT_NAME}.yaml exec backend bash"
-echo ""
-echo "  # Add another site to this bench"
-echo "  docker compose --project-name ${PROJECT_NAME} -f ~/gitops/${PROJECT_NAME}.yaml exec backend \\"
-echo "    bench new-site newsite.example.com \\"
-echo "      --mariadb-user-host-login-scope='%' \\"
-echo "      --mariadb-root-password 'DB_PASSWORD_HERE' \\"
-echo "      --install-app erpnext \\"
-echo "      --admin-password 'ADMIN_PASSWORD_HERE'"
 echo ""

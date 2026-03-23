@@ -19,8 +19,6 @@
 #    - Its own site on a unique domain
 #    - Its own backup script and cron
 #
-#  Shared infrastructure (Traefik + MariaDB) is deployed once.
-#
 #  USAGE:
 #    1. Point all DNS A records to your server IP
 #    2. Edit the CONFIGURATION section below
@@ -44,38 +42,38 @@ FRAPPE_BRANCH="version-16"
 FRAPPE_USER="frappe"
 
 # --- Projects ---
-# Define projects as a bash array. Each entry is a pipe-delimited string:
+#
+# Each entry is a SINGLE LINE with pipe-delimited fields:
 #
 #   "project-name|domain|image-tag|extra-apps|apps-json"
 #
-#   project-name : Docker Compose project name (lowercase, hyphens ok)
-#   domain       : Site domain (DNS must point to this server)
+# Fields:
+#   project-name : Compose project name (lowercase, hyphens ok)
+#   domain       : Site domain (DNS A record must point to this server)
 #   image-tag    : Docker image tag (unique per app combination)
-#   extra-apps   : Space-separated apps to install AFTER erpnext (or "none")
-#   apps-json    : JSON array of apps to bake into the image
+#   extra-apps   : Space-separated apps to install AFTER erpnext, or "none"
+#   apps-json    : Single-line JSON array of apps for the Docker image
 #
 # IMPORTANT:
+#   - Each entry MUST be on a single line (no line breaks inside quotes)
 #   - erpnext is always installed via --install-app during new-site
-#   - Additional apps go in extra-apps AND in the apps-json
-#   - Projects sharing the same apps can share the same image-tag
+#   - Extra apps must also appear in apps-json
+#   - Projects with the same apps can share an image-tag (built only once)
+#
+# EXAMPLES:
+#   ERPNext only:
+#     "myproject|erp.example.com|img-erp:1.0.0|none|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"}]"
+#
+#   ERPNext + HRMS:
+#     "myproject|erp.example.com|img-erp-hr:1.0.0|hrms|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"}]"
+#
+#   ERPNext + HRMS + CRM:
+#     "myproject|erp.example.com|img-erp-hr-crm:1.0.0|hrms crm|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/crm\",\"branch\":\"main\"}]"
 
 PROJECTS=(
-
-  "boujeeboyz-one|boujeeboyzjerky.collabnscale.io|customapp-erp:1.0.0|none|[
-    {\"url\": \"https://github.com/frappe/erpnext\", \"branch\": \"version-16\"}
-  ]"
-
-  "boujeeboyz-two|boujeeboyz2.collabnscale.io|customapp-erp-hr:1.0.0|hrms|[
-    {\"url\": \"https://github.com/frappe/erpnext\", \"branch\": \"version-16\"},
-    {\"url\": \"https://github.com/frappe/hrms\", \"branch\": \"version-16\"}
-  ]"
-
-  "boujeeboyz-three|boujeeboyz3.collabnscale.io|customapp-erp-hr-crm:1.0.0|hrms crm|[
-    {\"url\": \"https://github.com/frappe/erpnext\", \"branch\": \"version-16\"},
-    {\"url\": \"https://github.com/frappe/hrms\", \"branch\": \"version-16\"},
-    {\"url\": \"https://github.com/frappe/crm\", \"branch\": \"main\"}
-  ]"
-
+  "boujeeboyz-one|boujeeboyzjerky.collabnscale.io|customapp-erp:1.0.0|none|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"}]"
+  "boujeeboyz-two|boujeeboyz2.collabnscale.io|customapp-erp-hr:1.0.0|hrms|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"}]"
+  "boujeeboyz-three|boujeeboyz3.collabnscale.io|customapp-erp-hr-crm:1.0.0|hrms crm|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/crm\",\"branch\":\"main\"}]"
 )
 
 ###############################################################################
@@ -90,14 +88,12 @@ step() { echo -e "\n${BOLD}=== $1 ===${NC}\n"; }
 
 FRAPPE_HOME="/home/${FRAPPE_USER}"
 
-# Parse a project entry into variables
 parse_project() {
-  local entry="$1"
-  P_NAME=$(echo "$entry" | cut -d'|' -f1)
-  P_DOMAIN=$(echo "$entry" | cut -d'|' -f2)
-  P_IMAGE=$(echo "$entry" | cut -d'|' -f3)
-  P_EXTRA_APPS=$(echo "$entry" | cut -d'|' -f4)
-  P_APPS_JSON=$(echo "$entry" | cut -d'|' -f5)
+  P_NAME=$(echo "$1" | cut -d'|' -f1)
+  P_DOMAIN=$(echo "$1" | cut -d'|' -f2)
+  P_IMAGE=$(echo "$1" | cut -d'|' -f3)
+  P_EXTRA_APPS=$(echo "$1" | cut -d'|' -f4)
+  P_APPS_JSON=$(echo "$1" | cut -d'|' -f5)
   P_IMAGE_NAME=$(echo "$P_IMAGE" | cut -d':' -f1)
   P_IMAGE_TAG=$(echo "$P_IMAGE" | cut -d':' -f2)
 }
@@ -110,7 +106,7 @@ step "PHASE 0: Pre-flight checks"
 
 command -v dig &>/dev/null || { apt-get update -qq; apt-get install -y -qq dnsutils >/dev/null 2>&1; }
 
-echo "Checking DNS for all project domains..."
+log "Checking DNS for all project domains..."
 for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   parse_project "$PROJECT_ENTRY"
   RESOLVED_IP=$(dig +short "${P_DOMAIN}" | head -1)
@@ -164,14 +160,12 @@ TRAEFIK_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=\n' | head -c 16)
 
 sudo -u "$FRAPPE_USER" mkdir -p "${FRAPPE_HOME}/passwords"
 
-# Generate a unique admin password per project
 declare -A ADMIN_PASSWORDS
 for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   parse_project "$PROJECT_ENTRY"
   ADMIN_PASSWORDS["$P_NAME"]=$(openssl rand -base64 24 | tr -d '/+=\n' | head -c 16)
 done
 
-# Save all credentials
 PASS_FILE="${FRAPPE_HOME}/passwords/all-credentials.txt"
 cat > "$PASS_FILE" << EOF
 # ERPNext Multi-Project Credentials — $(date)
@@ -184,12 +178,14 @@ EOF
 
 for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   parse_project "$PROJECT_ENTRY"
+  APPS_DISPLAY="erpnext"
+  [ "${P_EXTRA_APPS}" != "none" ] && APPS_DISPLAY="erpnext, ${P_EXTRA_APPS}"
   cat >> "$PASS_FILE" << EOF
 # --- ${P_NAME} ---
 # Site: ${P_DOMAIN}
 # Image: ${P_IMAGE}
-# Apps: erpnext ${P_EXTRA_APPS}
-ADMIN_PASSWORD_${P_NAME}=${ADMIN_PASSWORDS["$P_NAME"]}
+# Apps: ${APPS_DISPLAY}
+ADMIN_PASSWORD_${P_NAME}=${ADMIN_PASSWORDS[$P_NAME]}
 
 EOF
 done
@@ -220,7 +216,6 @@ step "PHASE 5: Build Docker images"
 
 cd "${FRAPPE_HOME}/frappe_docker"
 
-# Collect unique images to build (avoid rebuilding the same image twice)
 declare -A IMAGES_TO_BUILD
 for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   parse_project "$PROJECT_ENTRY"
@@ -233,12 +228,9 @@ IMAGE_NUM=0
 for IMAGE_FULL in "${!IMAGES_TO_BUILD[@]}"; do
   IMAGE_NUM=$((IMAGE_NUM + 1))
   APPS_JSON="${IMAGES_TO_BUILD[$IMAGE_FULL]}"
-  IMG_NAME=$(echo "$IMAGE_FULL" | cut -d':' -f1)
-  IMG_TAG=$(echo "$IMAGE_FULL" | cut -d':' -f2)
 
-  # Check if image already exists
   if docker image inspect "${IMAGE_FULL}" >/dev/null 2>&1; then
-    log "Image ${IMAGE_FULL} already exists, skipping build. (${IMAGE_NUM}/${IMAGE_COUNT})"
+    log "Image ${IMAGE_FULL} already exists, skipping. (${IMAGE_NUM}/${IMAGE_COUNT})"
     continue
   fi
 
@@ -314,7 +306,7 @@ for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   YAML_FILE="${FRAPPE_HOME}/gitops/${P_NAME}.yaml"
 
   echo ""
-  log "--- Project ${PROJECT_NUM}/${TOTAL_PROJECTS}: ${P_NAME} (${P_DOMAIN}) ---"
+  log "━━━ Project ${PROJECT_NUM}/${TOTAL_PROJECTS}: ${P_NAME} (${P_DOMAIN}) ━━━"
 
   # --- Build env file ---
   log "Creating env file..."
@@ -435,10 +427,9 @@ BKEOF
   chown "${FRAPPE_USER}:${FRAPPE_USER}" "${FRAPPE_HOME}/scripts/backup-${P_NAME}.sh"
   chmod +x "${FRAPPE_HOME}/scripts/backup-${P_NAME}.sh"
 
-  # Stagger backup times so they don't all run at once (2:00, 2:15, 2:30, ...)
+  # Stagger backup times: 2:00, 2:15, 2:30, ...
   CRON_MINUTE=$(( (PROJECT_NUM - 1) * 15 ))
-  sudo -u "$FRAPPE_USER" bash -c \
-    "( crontab -l 2>/dev/null | grep -v 'backup-${P_NAME}' || true; echo '${CRON_MINUTE} 2 * * * ${FRAPPE_HOME}/scripts/backup-${P_NAME}.sh >> ${FRAPPE_HOME}/logs/backup-${P_NAME}.log 2>&1' ) | crontab -"
+  sudo -u "$FRAPPE_USER" bash -c "echo '${CRON_MINUTE} 2 * * * ${FRAPPE_HOME}/scripts/backup-${P_NAME}.sh >> ${FRAPPE_HOME}/logs/backup-${P_NAME}.log 2>&1' | crontab -"
   log "Backup cron installed (daily 2:$(printf '%02d' $CRON_MINUTE) AM)."
 
   log "Project ${P_NAME} complete!"
@@ -505,7 +496,7 @@ echo "--- Commands (run as: su - ${FRAPPE_USER}) ---"
 echo ""
 for PROJECT_ENTRY in "${PROJECTS[@]}"; do
   parse_project "$PROJECT_ENTRY"
-  echo "  # ${P_NAME}: logs / restart / backup / shell"
+  echo "  # ${P_NAME}"
   echo "  docker compose --project-name ${P_NAME} -f ~/gitops/${P_NAME}.yaml logs -f backend"
   echo "  docker compose --project-name ${P_NAME} -f ~/gitops/${P_NAME}.yaml down && docker compose --project-name ${P_NAME} -f ~/gitops/${P_NAME}.yaml up -d"
   echo "  ~/scripts/backup-${P_NAME}.sh"

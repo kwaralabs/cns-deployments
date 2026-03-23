@@ -29,11 +29,11 @@ PROJECTS=(
 ```
 
 Key design decisions:
-Different app combos → different images. Since apps are baked in at build time, boujeeboyz-one (erpnext only) uses customapp-erp:1.0.0, while boujeeboyz-two (erpnext + hrms) uses customapp-erp-hr:1.0.0. The script deduplicates — if two projects share the same image tag, it only builds once.
-Each project gets its own bench. Own redis, workers, scheduler, frontend. They share only Traefik and MariaDB.
-Each project gets its own admin password. Stored together in ~/passwords/all-credentials.txt.
-Backup crons are staggered. Project 1 backs up at 2:00, project 2 at 2:15, project 3 at 2:30 — so they don't hammer MariaDB simultaneously.
-To add or remove projects, just edit the PROJECTS array. For example, to add a fourth project:
+- Different app combos → different images. Since apps are baked in at build time, boujeeboyz-one (erpnext only) uses customapp-erp:1.0.0, while boujeeboyz-two (erpnext + hrms) uses customapp-erp-hr:1.0.0. The script deduplicates — if two projects share the same image tag, it only builds once.
+- Each project gets its own bench. Own redis, workers, scheduler, frontend. They share only Traefik and MariaDB.
+- Each project gets its own admin password. Stored together in ~/passwords/all-credentials.txt.
+- Backup crons are staggered. Project 1 backs up at 2:00, project 2 at 2:15, project 3 at 2:30 — so they don't hammer MariaDB simultaneously.
+- To add or remove projects, just edit the PROJECTS array. For example, to add a fourth project:
 
 ```
 "client-four|client4.collabnscale.io|customapp-erp-hr:1.0.0|hrms|[

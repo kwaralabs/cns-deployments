@@ -1,9 +1,8 @@
 # Usage Guidance of setup-erpnext.sh
 
-To use on a freshly reset VPS:
+To use on a freshly reset VPS. As root on the fresh VPS:
 
 ```
-# As root on the fresh VPS:
 apt-get update && apt-get install -y curl
 ```
 ```

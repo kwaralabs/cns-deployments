@@ -6,7 +6,7 @@ To use on a freshly reset VPS. As root on the fresh VPS:
 apt-get update && apt-get install -y curl
 ```
 ```
-curl -o setup-erpnext.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/base-erpnext-hrms/setup-erpnext-hrms.sh'
+curl -o setup-erpnext.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/base-erpnext-drive/setup-erpnext-drive.sh'
 ```
 ```
 chmod +x setup-erpnext.sh

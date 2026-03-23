@@ -7,7 +7,7 @@ To use on a freshly reset VPS:
 apt-get update && apt-get install -y curl
 ```
 ```
-curl -o setup-erpnext.sh 'YOUR_URL_OR_PASTE_THE_FILE'
+curl -o setup-erpnext.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/base/setup-erpnext.sh'
 ```
 ```
 chmod +x setup-erpnext.sh

@@ -1,4 +1,4 @@
-# Usage Guidance of setup-erpnext.sh
+# Usage Guidance of setup.sh
 
 To use on a freshly reset VPS. As root on the fresh VPS:
 
@@ -6,13 +6,13 @@ To use on a freshly reset VPS. As root on the fresh VPS:
 apt-get update && apt-get install -y curl
 ```
 ```
-curl -o setup-erpnext.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/base-erpnext/setup-erpnext.sh'
+curl -o setup.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/base-erpnext/setup-erpnext.sh'
 ```
 ```
-chmod +x setup-erpnext.sh
+chmod +x setup.sh
 ```
 ```
-./setup-erpnext.sh
+./setup.sh
 ```
 
 The script runs as root, creates the frappe user, installs Docker, builds the image, and deploys everything. It will stop with a clear error message if any critical check fails (wrong domain in YAML, missing env vars, etc.).

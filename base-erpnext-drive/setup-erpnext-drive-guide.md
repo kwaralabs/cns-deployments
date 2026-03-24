@@ -1,4 +1,4 @@
-# Usage Guidance of setup-erpnext.sh
+# Usage Guidance of setup.sh
 
 To use on a freshly reset VPS. As root on the fresh VPS:
 

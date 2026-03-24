@@ -7,7 +7,22 @@
 #  Reference: https://github.com/frappe/frappe_docker
 #
 #  Supports apps requiring pnpm (e.g., Frappe Drive) by patching the
-#  Containerfile to install pnpm globally before bench init.
+#  Containerfile to install pnpm as root before the USER frappe switch.
+#
+#  Key decisions (each from a real production failure):
+#
+#    1. compose.yaml NEVER edited — uses CUSTOM_IMAGE/CUSTOM_TAG env vars
+#    2. SITES_RULE sed-replaced — Traefik routing host rule
+#    3. SITES/ROUTER/BENCH_NETWORK appended — don't exist in example.env
+#    4. Traefik password $$ escaped — Docker Compose var interpolation
+#    5. --mariadb-user-host-login-scope='%' — replaces deprecated flag
+#    6. Python/Node build args omitted — Containerfile has correct defaults
+#    7. Cron uses echo|crontab — piped crontab -l crashes on fresh users
+#    8. pnpm patch inserts RUN BEFORE "USER frappe" (line with that text),
+#       so it runs as root. Previous attempt inserted after USER frappe
+#       and failed with EACCES permission denied.
+#    9. PROJECTS entries must be single-line — multi-line JSON breaks
+#       the pipe delimiter parsing.
 #
 #  USAGE:
 #    1. Point all DNS A records to your server IP
@@ -28,22 +43,40 @@ LETSENCRYPT_EMAIL="admin@collabnscale.com"
 FRAPPE_BRANCH="version-16"
 FRAPPE_USER="frappe"
 
-# Set to "yes" if ANY project uses an app that requires pnpm (e.g., Drive).
-# This patches the Containerfile to install pnpm globally in the builder stage.
+# Set to "yes" if ANY project uses an app that requires pnpm (e.g., Drive, CRM).
+# This patches the Containerfile to install pnpm globally as root.
 NEEDS_PNPM="yes"
 
 # --- Projects ---
-# Each entry: "name|domain|image-tag|extra-apps|apps-json"
-# MUST be a single line. See examples in comments below.
+# Each entry is a SINGLE LINE: "name|domain|image-tag|extra-apps|apps-json"
 #
 # Fields:
-#   name       : Compose project name
-#   domain     : Site domain (DNS must point here)
-#   image-tag  : Docker image tag (unique per app combo)
-#   extra-apps : Apps to install AFTER erpnext, or "none"
-#   apps-json  : Single-line JSON of apps for the image
+#   name       : Compose project name (lowercase, hyphens)
+#   domain     : Site domain (DNS A record must point to server)
+#   image-tag  : Docker image tag (unique per app combination)
+#   extra-apps : Space-separated apps to install AFTER erpnext, or "none"
+#   apps-json  : Single-line JSON array of apps for the Docker image
 #
-# NOTE on Drive: Use branch "main" (Drive has no version-16 branch)
+# NOTES:
+#   - erpnext is always installed via --install-app during new-site
+#   - Extra apps must also appear in apps-json
+#   - Projects with same apps can share an image-tag (built only once)
+#   - Drive uses branch "main" (no version-16 branch)
+#   - CRM uses branch "main"
+#
+# EXAMPLES:
+#
+#   ERPNext only:
+#     "proj|erp.example.com|img-erp:1.0.0|none|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"}]"
+#
+#   ERPNext + HRMS:
+#     "proj|erp.example.com|img-erp-hr:1.0.0|hrms|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"}]"
+#
+#   ERPNext + Drive:
+#     "proj|erp.example.com|img-erp-drive:1.0.0|drive|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/drive\",\"branch\":\"main\"}]"
+#
+#   ERPNext + HRMS + CRM:
+#     "proj|erp.example.com|img-all:1.0.0|hrms crm|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/crm\",\"branch\":\"main\"}]"
 
 PROJECTS=(
   "boujeeboyz-one|boujeeboyzjerky.collabnscale.io|customapp-erp-drive:1.0.0|drive|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/drive\",\"branch\":\"main\"}]"
@@ -190,28 +223,26 @@ CONTAINERFILE="images/custom/Containerfile"
 if [ "${NEEDS_PNPM}" = "yes" ]; then
   log "Patching Containerfile to install pnpm..."
 
-  # Create a patched copy so we don't modify the git-tracked original
   PATCHED_CONTAINERFILE="images/custom/Containerfile.pnpm"
   cp "${CONTAINERFILE}" "${PATCHED_CONTAINERFILE}"
-
-  # The builder stage has a RUN that starts with:
-  #   RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install ...
-  # We need to add "npm install -g pnpm" AFTER the nvm/node setup but
-  # BEFORE bench init. The safest injection point is right after the
-  # existing "RUN apt-get update" block in the builder stage.
-  #
-  # Strategy: Find the line "bench init" and insert pnpm install before it.
-  # We use sed to add a line before the "bench init" command.
 
   if grep -q "npm install -g pnpm" "${PATCHED_CONTAINERFILE}"; then
     log "Containerfile already has pnpm — skipping patch."
   else
-    # Insert "npm install -g pnpm &&" before "bench init"
-    sed -i '/bench init/i\  npm install -g pnpm && \\' "${PATCHED_CONTAINERFILE}"
-    log "Containerfile patched: added 'npm install -g pnpm'"
+    # Insert "RUN npm install -g pnpm" BEFORE the first "USER frappe" line.
+    # This runs as root in the builder stage, avoiding EACCES permission errors.
+    # The Containerfile has two "USER frappe" lines (builder + backend stages).
+    # We target the FIRST one using sed with the address range "0,/pattern/".
+    sed -i '0,/^USER frappe/s/^USER frappe/RUN npm install -g pnpm\nUSER frappe/' "${PATCHED_CONTAINERFILE}"
+
+    # Verify the patch worked
+    if grep -B1 "^USER frappe" "${PATCHED_CONTAINERFILE}" | head -2 | grep -q "npm install -g pnpm"; then
+      log "Containerfile patched: 'RUN npm install -g pnpm' inserted before first USER frappe"
+    else
+      err "Containerfile patch failed. Check ${PATCHED_CONTAINERFILE} manually."
+    fi
   fi
 
-  # Use the patched Containerfile for all builds
   CONTAINERFILE="${PATCHED_CONTAINERFILE}"
 fi
 
@@ -234,7 +265,7 @@ for IMAGE_FULL in "${!IMAGES_TO_BUILD[@]}"; do
     continue
   fi
 
-  log "Building image ${IMAGE_NUM}/${IMAGE_COUNT}: ${IMAGE_FULL}..."
+  log "Building image ${IMAGE_NUM}/${IMAGE_COUNT}: ${IMAGE_FULL} (10-30 min)..."
   APPS_JSON_BASE64=$(echo "${APPS_JSON}" | base64 -w 0)
 
   docker build \

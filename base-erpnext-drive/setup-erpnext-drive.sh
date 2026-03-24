@@ -83,7 +83,7 @@ APPS_JSON='[
 # Apps to install on the site AFTER erpnext.
 # These must also be listed in APPS_JSON above.
 # erpnext is excluded here because it's installed via --install-app during new-site.
-EXTRA_APPS="hrms"
+EXTRA_APPS="drive"
 
 ###############################################################################
 # INTERNALS — DO NOT EDIT

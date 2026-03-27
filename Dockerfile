@@ -61,11 +61,13 @@ USER frappe
 WORKDIR /home/frappe
 
 # ── Python via uv ─────────────────────────────────────────────────────────────
+# --system: uv pip operates on the system Python, not a virtualenv
+# bench init creates its own virtualenv internally, so we don't need one here
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && /home/frappe/.local/bin/uv python install ${PYTHON_VERSION} --default \
     && /home/frappe/.local/bin/uv python pin ${PYTHON_VERSION} \
-    && /home/frappe/.local/bin/uv pip install --upgrade "pip>=25.3" \
-    && /home/frappe/.local/bin/uv run python --version
+    && /home/frappe/.local/bin/uv pip install --system --upgrade "pip>=25.3" \
+    && python --version
 
 # ── Node.js via nvm ───────────────────────────────────────────────────────────
 # nvm install <major> resolves to the latest LTS patch for that major.

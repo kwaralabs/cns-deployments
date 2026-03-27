@@ -139,6 +139,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo \
     libpng16-16 \
     xvfb \
+    # wkhtmltopdf hard dependencies (must be present before the .deb install)
+    fontconfig \
+    xfonts-75dpi \
+    xfonts-base \
     libfontconfig1 \
     libxrender1 \
     libxext6 \
@@ -150,11 +154,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── wkhtmltopdf 0.12.6 with patched Qt ───────────────────────────────────────
 # The apt package (0.12.6-2) is unpatched and breaks Frappe PDF generation.
-# Must install from the official wkhtmltopdf release.
+# Must install from the official wkhtmltopdf project release.
+# Note: --no-install-recommends is intentionally omitted here — the .deb
+# resolver requires it absent to correctly satisfy wkhtmltox dependencies.
 RUN curl -fsSL \
     https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
     -o /tmp/wkhtmltox.deb \
-    && apt-get install -y --no-install-recommends /tmp/wkhtmltox.deb \
+    && apt-get install -y /tmp/wkhtmltox.deb \
     && rm /tmp/wkhtmltox.deb \
     && rm -rf /var/lib/apt/lists/* \
     && wkhtmltopdf --version

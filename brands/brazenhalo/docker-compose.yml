@@ -2,31 +2,52 @@
 # ERPNext — BrazenHalo
 # Brand:       BRAZENHALO
 # Source:      Pulled by Dokploy from Git (brands/brazenhalo/docker-compose.yml)
-# Image:       Official frappe/erpnext from Docker Hub — no local build
-# Environments: dev | test | demo | prod — controlled via ENVIRONMENT var
+# Image:       Built by Dokploy from ./Dockerfile in the same repo
+# Environments: dev | test | demo | prod — controlled via env vars in Dokploy
 #
 # HOW DOKPLOY USES THIS FILE:
 #   1. Dokploy pulls this file from your Git repo on every deploy trigger.
-#   2. Dokploy injects all [SECRET] variables from its own env var store.
-#   3. Dokploy manages the reverse proxy (Traefik) separately — do NOT add
-#      Traefik labels here; configure the domain in the Dokploy application UI.
-#   4. IMAGE_TAG is set per-environment in Dokploy to enforce immutable deploys.
+#   2. Dokploy builds the image from ./Dockerfile using the build args below.
+#      In Dokploy application settings → Build tab:
+#        Build type:    Dockerfile
+#        Dockerfile:    ./Dockerfile          (relative to repo root)
+#        Build context: .                     (repo root)
+#   3. Dokploy injects all [SECRET] variables from its own env var store.
+#   4. Dokploy manages the reverse proxy (Traefik) separately — configure the
+#      domain and port in the Dokploy application UI, not via labels here.
 #
-# ENVIRONMENT DEFAULTS (override per environment in Dokploy):
-#   dev:   IMAGE_TAG=latest, relaxed resources, FRAPPE_SITE_NAME=bh-dev.internal
-#   test:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=bh-test.internal
-#   demo:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=bh-demo.internal
-#   prod:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=erp.brazenhalo.com
+# IMAGE TAGGING (set IMAGE_TAG in Dokploy per environment):
+#   dev:   dev-<short-sha>    rebuilt on every push, floating
+#   test:  v15.28.1-r3        pinned — promoted from dev, never rebuilt
+#   prod:  v15.28.1-r3        same tag as test — binary-identical
 # =============================================================================
 
-x-image: &image
-  image: frappe/erpnext:${IMAGE_TAG:-version-15}
+# x-frappe-build defines the build config shared by all Frappe services.
+# Dokploy builds this once and reuses the resulting image for every service
+# that references it. All services in this stack use the same image — they
+# differ only in their `command:`.
+x-frappe-build: &frappe-build
+  build:
+    context: ${BUILD_CONTEXT:-.}
+    dockerfile: ${DOCKERFILE:-./Dockerfile}
+    args:
+      # Pinned versions — set these as build args in Dokploy Build tab.
+      # Changing any arg busts the build cache and triggers a full rebuild.
+      FRAPPE_VERSION: ${FRAPPE_VERSION:-version-15}
+      ERPNEXT_VERSION: ${ERPNEXT_VERSION:-version-15}
+      HRMS_VERSION: ${HRMS_VERSION:-version-15}
+      CRM_VERSION: ${CRM_VERSION:-2.x}
+      PYTHON_VERSION: ${PYTHON_VERSION:-3.11.6}
+      NODE_VERSION: ${NODE_VERSION:-18.18.2}
+  # Image name Dokploy tags the built image with.
+  # Set IMAGE_TAG in Dokploy env — same tag promotes through dev→test→prod.
+  image: ${IMAGE_REGISTRY:-ghcr.io/kwaralabs}/frappe-base:${IMAGE_TAG:-dev}
 
-# Env vars shared by every Frappe process (backend, workers, scheduler, ws)
+# Env vars shared by every Frappe process
 x-frappe-env: &frappe-env
-  # --- Site identity [CONFIG: set per environment in Dokploy] ---
+  # --- Site identity [ENV: set per environment in Dokploy] ---
   FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
-  # --- Database [CONFIG: host is always the internal service name] ---
+  # --- Database [CONFIG: internal service name, never changes] ---
   DB_HOST: mariadb
   DB_PORT: "3306"
   # --- Database credentials [SECRET: set in Dokploy — never commit values] ---
@@ -34,13 +55,15 @@ x-frappe-env: &frappe-env
   MYSQL_USER: ${MYSQL_USER:-frappe}
   MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in Dokploy}
   MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
-  # --- Redis [CONFIG: internal service names, fixed] ---
+  # --- Redis [CONFIG: fixed internal service names] ---
   REDIS_CACHE: redis-cache:6379
   REDIS_QUEUE: redis-queue:6379
-  # --- Admin [SECRET: set in Dokploy] ---
+  # --- Admin [SECRET: set in Dokploy — used only on first-boot site creation] ---
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
   # --- Apps to install on first boot [CONFIG] ---
-  INSTALL_APPS: ${INSTALL_APPS:-erpnext}
+  # Must match exactly the app names baked into the image via Dockerfile.
+  # Comma-separated. Order matters — install frappe deps before dependents.
+  INSTALL_APPS: ${INSTALL_APPS:-erpnext,hrms,crm}
 
 # Healthcheck gate reused by all Frappe app services
 x-depends-ready: &depends-ready
@@ -60,16 +83,13 @@ services:
 
   # ---------------------------------------------------------------------------
   # CONFIGURATOR
-  # One-shot init container. Runs before any Frappe service starts.
-  #
-  # First boot:  creates the site, installs apps defined in INSTALL_APPS.
-  # Subsequent:  detects existing site_config.json, runs bench migrate only.
-  #
-  # Dokploy behaviour: this service runs on every redeploy. The site-exists
-  # check makes it idempotent — safe to re-run on config-only changes.
+  # One-shot init container. Dokploy runs this on every deploy.
+  # First boot:   creates the Frappe site, installs apps from INSTALL_APPS.
+  # Subsequent:   detects site_config.json, runs bench migrate only.
+  # Idempotent:   safe to re-run — the site-exists check guards new-site.
   # ---------------------------------------------------------------------------
   configurator:
-    <<: *image
+    <<: *frappe-build
     command: >
       bash -c "
         echo '[configurator] Waiting for MariaDB...' &&
@@ -115,11 +135,11 @@ services:
 
   # ---------------------------------------------------------------------------
   # BACKEND
-  # Gunicorn WSGI server. Starts only after configurator succeeds.
-  # Not exposed directly — frontend (nginx) proxies to it.
+  # Gunicorn WSGI server. Starts only after configurator exits successfully.
+  # Not exposed externally — frontend (nginx) proxies all traffic to it.
   # ---------------------------------------------------------------------------
   backend:
-    <<: *image
+    <<: *frappe-build
     command: bench serve --port 8000
     environment:
       <<: *frappe-env
@@ -140,17 +160,16 @@ services:
 
   # ---------------------------------------------------------------------------
   # FRONTEND
-  # Nginx — serves JS/CSS assets and reverse-proxies to backend + websocket.
+  # Nginx — serves compiled JS/CSS assets and proxies to backend + websocket.
   #
-  # Dokploy proxy integration:
-  #   Do NOT add Traefik labels here. In the Dokploy application UI, set:
-  #     Domain:   erp.brazenhalo.com  (or bh-dev.internal for dev)
-  #     Port:     8080
-  #     HTTPS:    enabled (Dokploy manages cert via its Traefik instance)
-  #   Dokploy will attach its own Traefik labels automatically.
+  # Dokploy proxy setup (configure in the Dokploy application UI):
+  #   Domain:  erp.brazenhalo.com  (prod) | bh-dev.internal (dev)
+  #   Port:    8080
+  #   HTTPS:   enabled — Dokploy handles TLS via its Traefik instance
+  # Do NOT add Traefik labels here — Dokploy injects them automatically.
   # ---------------------------------------------------------------------------
   frontend:
-    <<: *image
+    <<: *frappe-build
     command: nginx-entrypoint.sh
     environment:
       FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
@@ -163,9 +182,9 @@ services:
       PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
       CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
     ports:
-      # Dokploy detects this port and wires its Traefik proxy to it.
-      # Change FRONTEND_PORT per environment if running multiple stacks
-      # on the same non-prod node (dev=8080, test=8081, demo=8082).
+      # Port Dokploy's Traefik proxy connects to.
+      # Use different FRONTEND_PORT values per environment on shared nodes:
+      #   prod=8080  dev=8080  test=8081  demo=8082
       - "${FRONTEND_PORT:-8080}:8080"
     volumes:
       - bh-sites:/home/frappe/frappe-bench/sites:ro
@@ -189,7 +208,7 @@ services:
   # Node.js socketio — Frappe realtime (live form updates, notifications).
   # ---------------------------------------------------------------------------
   websocket:
-    <<: *image
+    <<: *frappe-build
     command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
     environment:
       <<: *frappe-env
@@ -204,11 +223,11 @@ services:
 
   # ---------------------------------------------------------------------------
   # SCHEDULER
-  # Frappe APScheduler — email queue flush, background job triggers,
-  # scheduled reports. Must be a single instance (not scaled).
+  # Frappe APScheduler — flushes email queue, triggers background jobs,
+  # runs scheduled reports. Single instance only — never scale this.
   # ---------------------------------------------------------------------------
   scheduler:
-    <<: *image
+    <<: *frappe-build
     command: bench schedule
     environment:
       <<: *frappe-env
@@ -223,18 +242,16 @@ services:
 
   # ---------------------------------------------------------------------------
   # QUEUE WORKERS
-  # rq workers. Dokploy runs plain Compose (not Swarm), so worker count is
-  # controlled by running named duplicate services rather than deploy.replicas.
+  # rq workers consuming Frappe's job queues from Redis.
+  # Dokploy uses plain Compose — not Swarm — so deploy.replicas is ignored.
+  # Scale by adding named sibling services (queue-short-2 etc.) if needed.
   #
-  # To scale: add queue-short-2, queue-short-3 etc. with identical config,
-  # or increase counts by duplicating the service block per environment.
-  #
-  # short:   fast jobs — email sends, webhooks, form triggers
-  # long:    slow jobs — report generation, data imports, print formats
-  # default: everything else
+  # short:    email sends, webhooks, lightweight form triggers
+  # long:     report generation, data imports, bulk operations
+  # default:  general purpose fallback
   # ---------------------------------------------------------------------------
   queue-short:
-    <<: *image
+    <<: *frappe-build
     command: bench worker --queue short
     environment:
       <<: *frappe-env
@@ -248,7 +265,7 @@ services:
     restart: unless-stopped
 
   queue-long:
-    <<: *image
+    <<: *frappe-build
     command: bench worker --queue long
     environment:
       <<: *frappe-env
@@ -262,7 +279,7 @@ services:
     restart: unless-stopped
 
   queue-default:
-    <<: *image
+    <<: *frappe-build
     command: bench worker --queue default
     environment:
       <<: *frappe-env
@@ -277,11 +294,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # MARIADB
-  # Dedicated instance — never shared with other brands.
-  # Port 3306 is NOT published to the host. Internal network only.
-  #
-  # Credentials file pattern: avoids embedding MYSQL_ROOT_PASSWORD in the
-  # healthcheck command string (which would expose it in `docker inspect`).
+  # Dedicated instance — one per brand, never shared across brands in prod.
+  # Port 3306 intentionally NOT published to the host.
   # ---------------------------------------------------------------------------
   mariadb:
     image: mariadb:10.6
@@ -302,28 +316,27 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
     volumes:
       - bh-mariadb-data:/var/lib/mysql
-      # Credentials file so healthcheck never exposes the password in
-      # process arguments or `docker inspect` output.
       - bh-mariadb-conf:/etc/mysql/conf.d
     networks:
       - bh-internal
     restart: unless-stopped
     healthcheck:
+      # Reads from credentials file — password never appears in process args
+      # or docker inspect output. File is written by mariadb-init below.
       test: ["CMD", "mysqladmin", "ping", "--defaults-file=/etc/mysql/conf.d/healthcheck.cnf", "-h", "localhost"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 40s
 
-  # mariadb-init writes the credentials file into the shared conf volume
-  # before the healthcheck fires. One-shot, never restarts.
+  # Writes /etc/mysql/conf.d/healthcheck.cnf before MariaDB healthcheck fires.
+  # One-shot — never restarts.
   mariadb-init:
     image: busybox:latest
     command: >
       sh -c "
-        echo '[client]' > /conf/healthcheck.cnf &&
-        echo 'user=root' >> /conf/healthcheck.cnf &&
-        echo \"password=$$MYSQL_ROOT_PASSWORD\" >> /conf/healthcheck.cnf &&
+        printf '[client]\nuser=root\npassword=%s\n' \"$$MYSQL_ROOT_PASSWORD\"
+          > /conf/healthcheck.cnf &&
         chmod 600 /conf/healthcheck.cnf &&
         echo '[mariadb-init] Credentials file written.'
       "
@@ -331,11 +344,13 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
     volumes:
       - bh-mariadb-conf:/conf
+    networks:
+      - bh-internal
     restart: "no"
 
   # ---------------------------------------------------------------------------
   # REDIS — CACHE
-  # LRU eviction, no persistence. Cache loss is safe — Frappe rebuilds it.
+  # LRU eviction, no persistence. Safe to lose — Frappe rebuilds on restart.
   # ---------------------------------------------------------------------------
   redis-cache:
     image: redis:7-alpine
@@ -358,7 +373,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # REDIS — QUEUE
-  # noeviction + AOF persistence. Queued jobs must survive a restart.
+  # noeviction + AOF persistence. Queued background jobs must survive restarts.
   # ---------------------------------------------------------------------------
   redis-queue:
     image: redis:7-alpine
@@ -381,8 +396,8 @@ services:
 
 # =============================================================================
 # VOLUMES
-# Prefixed bh- to avoid collision on shared non-prod nodes where multiple
-# brand stacks run on the same Docker host.
+# All prefixed bh- to avoid collision on shared non-prod nodes where multiple
+# brand stacks may run on the same Docker host.
 # =============================================================================
 volumes:
   bh-sites:
@@ -400,10 +415,10 @@ volumes:
 
 # =============================================================================
 # NETWORKS
-# bh-internal: isolated bridge — no internet egress from app services.
-#              MariaDB and Redis are reachable only from within this network.
-# No external proxy network defined here — Dokploy manages Traefik's network
-# attachment automatically when you configure the domain in its UI.
+# bh-internal: isolated bridge — internal: true blocks internet egress from
+#              app services. MariaDB and Redis unreachable from outside.
+# No external proxy network — Dokploy attaches its Traefik network
+# automatically when you configure the application domain in its UI.
 # =============================================================================
 networks:
   bh-internal:

@@ -32,7 +32,7 @@ x-custom-image: &custom_image
   # Dokploy builds from ./Dockerfile and tags the result as IMAGE_NAME:IMAGE_TAG.
   # PULL_POLICY=missing ensures Dokploy uses the locally built image.
   image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-base}:${IMAGE_TAG:-dev-v16}
-  pull_policy: ${PULL_POLICY:-missing}
+  pull_policy: ${PULL_POLICY:-always}
   deploy:
     restart_policy:
       condition: always

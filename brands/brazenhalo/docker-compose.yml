@@ -1,304 +1,388 @@
 # =============================================================================
 # ERPNext — BrazenHalo
-# Brand:       BRAZENHALO
-# Source:      Pulled by Dokploy from Git (brands/brazenhalo/docker-compose.yml)
-# Image:       Built by Dokploy from ./Dockerfile in the same repo
-# Environments: dev | test | demo | prod — controlled via env vars in Dokploy
+# Brand:        BRAZENHALO
+# Managed by:   Dokploy (Git source, Dockerfile build)
+# Reference:    Dokploy ERPNext compose pattern
 #
-# HOW DOKPLOY USES THIS FILE:
-#   1. Dokploy pulls this file from your Git repo on every deploy trigger.
-#   2. Dokploy builds the image from ./Dockerfile using the build args below.
-#      In Dokploy application settings → Build tab:
-#        Build type:    Dockerfile
-#        Dockerfile:    ./Dockerfile          (relative to repo root)
-#        Build context: .                     (repo root)
-#   3. Dokploy injects all [SECRET] variables from its own env var store.
-#   4. Dokploy manages the reverse proxy (Traefik) separately — configure the
-#      domain and port in the Dokploy application UI, not via labels here.
+# HOW THIS WORKS IN DOKPLOY:
+#   Dokploy pulls this file from Git and builds the image from ./Dockerfile
+#   using the build args defined in the Dokploy Build tab.
+#   All [SECRET] variables are set in Dokploy's Environment tab.
 #
-# IMAGE TAGGING (set IMAGE_TAG in Dokploy per environment):
-#   dev:   dev-<short-sha>    rebuilt on every push, floating
-#   test:  v15.28.1-r3        pinned — promoted from dev, never rebuilt
-#   prod:  v15.28.1-r3        same tag as test — binary-identical
+# ONE-SHOT OPERATIONS (scale to 1 in Dokploy UI, then back to 0):
+#   CONFIGURE=1   → writes common_site_config.json (run once after first deploy)
+#   CREATE_SITE=1 → creates the Frappe site and installs apps (run once)
+#   MIGRATE=1     → runs bench migrate across all sites (run on upgrades)
+#   ENABLE_DB=1   → starts the MariaDB container (set permanently for local DB)
+#
+# FIRST DEPLOY — set all toggles to 1 simultaneously (mirrors Dokploy template):
+#   ENABLE_DB=1  CONFIGURE=1  REGENERATE_APPS_TXT=1  CREATE_SITE=1  MIGRATE=1
+#   Services are idempotent — running them together on a fresh stack is safe.
+#   After first boot completes, set CONFIGURE, REGENERATE_APPS_TXT,
+#   CREATE_SITE, and MIGRATE back to 0. Leave ENABLE_DB=1.
+#
+# UPGRADE SEQUENCE:
+#   1. Update IMAGE_TAG in Dokploy Build tab, redeploy (pulls new image)
+#   2. Set MIGRATE=1, redeploy → migrations run across all sites
+#   3. Set MIGRATE=0, redeploy → back to normal
 # =============================================================================
 
-# x-frappe-build defines the build config shared by all Frappe services.
-# Dokploy builds this once and reuses the resulting image for every service
-# that references it. All services in this stack use the same image — they
-# differ only in their `command:`.
-x-frappe-build: &frappe-build
-  build:
-    context: ${BUILD_CONTEXT:-.}
-    dockerfile: ${DOCKERFILE:-./Dockerfile}
-    args:
-      # Pinned versions — set these as build args in Dokploy Build tab.
-      # Changing any arg busts the build cache and triggers a full rebuild.
-      FRAPPE_VERSION: ${FRAPPE_VERSION:-version-15}
-      ERPNEXT_VERSION: ${ERPNEXT_VERSION:-version-15}
-      HRMS_VERSION: ${HRMS_VERSION:-version-15}
-      CRM_VERSION: ${CRM_VERSION:-2.x}
-      PYTHON_VERSION: ${PYTHON_VERSION:-3.11.6}
-      NODE_VERSION: ${NODE_VERSION:-18.18.2}
-  # Image name Dokploy tags the built image with.
-  # Set IMAGE_TAG in Dokploy env — same tag promotes through dev→test→prod.
-  image: ${IMAGE_REGISTRY:-ghcr.io/kwaralabs}/frappe-base:${IMAGE_TAG:-dev}
-
-# Env vars shared by every Frappe process
-x-frappe-env: &frappe-env
-  # --- Site identity [ENV: set per environment in Dokploy] ---
-  FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
-  # --- Database [CONFIG: internal service name, never changes] ---
-  DB_HOST: mariadb
-  DB_PORT: "3306"
-  # --- Database credentials [SECRET: set in Dokploy — never commit values] ---
-  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
-  MYSQL_USER: ${MYSQL_USER:-frappe}
-  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in Dokploy}
-  MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
-  # --- Redis [CONFIG: fixed internal service names] ---
-  REDIS_CACHE: redis-cache:6379
-  REDIS_QUEUE: redis-queue:6379
-  # --- Admin [SECRET: set in Dokploy — used only on first-boot site creation] ---
-  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
-  # --- Apps to install on first boot [CONFIG] ---
-  # Must match exactly the app names baked into the image via Dockerfile.
-  # Comma-separated. Order matters — install frappe deps before dependents.
-  INSTALL_APPS: ${INSTALL_APPS:-erpnext,hrms,crm}
-
-# Healthcheck gate reused by all Frappe app services
-x-depends-ready: &depends-ready
-  mariadb:
-    condition: service_healthy
-  redis-cache:
-    condition: service_healthy
-  redis-queue:
-    condition: service_healthy
-
-# Shared volume mounts for all Frappe app services
-x-frappe-volumes: &frappe-volumes
-  - bh-sites:/home/frappe/frappe-bench/sites
-  - bh-logs:/home/frappe/frappe-bench/logs
+x-custom-image: &custom_image
+  # IMAGE_NAME and IMAGE_TAG are set in Dokploy Build tab.
+  # Dokploy builds from ./Dockerfile and tags the result as IMAGE_NAME:IMAGE_TAG.
+  # PULL_POLICY=missing ensures Dokploy uses the locally built image.
+  image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-base}:${IMAGE_TAG:-dev-v16}
+  pull_policy: ${PULL_POLICY:-missing}
+  deploy:
+    restart_policy:
+      condition: always
 
 services:
 
   # ---------------------------------------------------------------------------
-  # CONFIGURATOR
-  # One-shot init container. Dokploy runs this on every deploy.
-  # First boot:   creates the Frappe site, installs apps from INSTALL_APPS.
-  # Subsequent:   detects site_config.json, runs bench migrate only.
-  # Idempotent:   safe to re-run — the site-exists check guards new-site.
-  # ---------------------------------------------------------------------------
-  configurator:
-    <<: *frappe-build
-    command: >
-      bash -c "
-        echo '[configurator] Waiting for MariaDB...' &&
-        wait-for-it mariadb:3306 --timeout=120 --strict &&
-        echo '[configurator] Waiting for Redis...' &&
-        wait-for-it redis-cache:6379 --timeout=30 --strict &&
-        wait-for-it redis-queue:6379 --timeout=30 --strict &&
-        SITE_CONFIG=/home/frappe/frappe-bench/sites/$$FRAPPE_SITE_NAME/site_config.json &&
-        if [ ! -f $$SITE_CONFIG ]; then
-          echo '[configurator] First boot — creating site...' &&
-          bench new-site $$FRAPPE_SITE_NAME
-            --mariadb-root-password $$MYSQL_ROOT_PASSWORD
-            --admin-password $$ADMIN_PASSWORD
-            --db-type mariadb
-            --db-host mariadb
-            --db-port 3306
-            --no-mariadb-socket &&
-          echo '[configurator] Installing apps: '$$INSTALL_APPS &&
-          for app in $$(echo $$INSTALL_APPS | tr ',' ' '); do
-            echo \"[configurator] Installing $$app...\" &&
-            bench --site $$FRAPPE_SITE_NAME install-app $$app;
-          done &&
-          echo '[configurator] First boot complete.';
-        else
-          echo '[configurator] Site exists — running migrations...' &&
-          bench --site $$FRAPPE_SITE_NAME migrate &&
-          echo '[configurator] Migrations complete.';
-        fi
-      "
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
-    depends_on:
-      mariadb:
-        condition: service_healthy
-      redis-cache:
-        condition: service_healthy
-      redis-queue:
-        condition: service_healthy
-    networks:
-      - bh-internal
-    restart: "no"
-
-  # ---------------------------------------------------------------------------
-  # BACKEND
-  # Gunicorn WSGI server. Starts only after configurator exits successfully.
-  # Not exposed externally — frontend (nginx) proxies all traffic to it.
+  # BACKEND — Gunicorn WSGI server
+  # Serves Frappe API and page rendering. Not exposed externally.
+  # Frontend (nginx) proxies all dynamic requests to this service.
   # ---------------------------------------------------------------------------
   backend:
-    <<: *frappe-build
-    command: bench serve --port 8000
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
-    depends_on:
-      <<: *depends-ready
-      configurator:
-        condition: service_completed_successfully
+    <<: *custom_image
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/method/ping"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 40s
+      test:
+        - CMD
+        - wait-for-it
+        - "0.0.0.0:8000"
+      interval: 2s
+      timeout: 10s
+      retries: 30
 
   # ---------------------------------------------------------------------------
-  # FRONTEND
-  # Nginx — serves compiled JS/CSS assets and proxies to backend + websocket.
+  # FRONTEND — Nginx reverse proxy
+  # Serves compiled JS/CSS assets directly.
+  # Proxies /api, /app, /assets to backend:8000 and /socket.io to websocket:9000.
   #
-  # Dokploy proxy setup (configure in the Dokploy application UI):
+  # Dokploy domain config (set in Dokploy application UI — NOT via labels here):
   #   Domain:  erp.brazenhalo.com  (prod) | bh-dev.internal (dev)
   #   Port:    8080
-  #   HTTPS:   enabled — Dokploy handles TLS via its Traefik instance
-  # Do NOT add Traefik labels here — Dokploy injects them automatically.
+  #   HTTPS:   enabled (Dokploy manages TLS via its Traefik instance)
   # ---------------------------------------------------------------------------
   frontend:
-    <<: *frappe-build
-    command: nginx-entrypoint.sh
+    <<: *custom_image
+    command:
+      - nginx-entrypoint.sh
+    depends_on:
+      backend:
+        condition: service_started
+        required: true
+      websocket:
+        condition: service_started
+        required: true
     environment:
-      FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-}
       UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
       UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
       UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
-      FRAPPE_SITE_NAME_HEADER: $$host
       PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
       CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     ports:
-      # Port Dokploy's Traefik proxy connects to.
-      # Use different FRONTEND_PORT values per environment on shared nodes:
+      # Dokploy Traefik connects to this port.
+      # Use different FRONTEND_PORT per environment on shared non-prod nodes:
       #   prod=8080  dev=8080  test=8081  demo=8082
       - "${FRONTEND_PORT:-8080}:8080"
-    volumes:
-      - bh-sites:/home/frappe/frappe-bench/sites:ro
-    depends_on:
-      backend:
-        condition: service_healthy
-      websocket:
-        condition: service_started
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      test:
+        - CMD
+        - wait-for-it
+        - "0.0.0.0:8080"
+      interval: 2s
+      timeout: 30s
+      retries: 30
 
   # ---------------------------------------------------------------------------
-  # WEBSOCKET
-  # Node.js socketio — Frappe realtime (live form updates, notifications).
+  # WEBSOCKET — Node.js Socket.IO server
+  # Handles Frappe realtime: live form updates, notifications, progress bars.
   # ---------------------------------------------------------------------------
   websocket:
-    <<: *frappe-build
-    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
+    <<: *custom_image
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
     depends_on:
-      <<: *depends-ready
       configurator:
         condition: service_completed_successfully
+        required: true
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - wait-for-it
+        - "0.0.0.0:9000"
+      interval: 2s
+      timeout: 10s
+      retries: 30
 
   # ---------------------------------------------------------------------------
-  # SCHEDULER
-  # Frappe APScheduler — flushes email queue, triggers background jobs,
-  # runs scheduled reports. Single instance only — never scale this.
+  # SCHEDULER — Frappe task scheduler
+  # Triggers periodic jobs: email queue flush, report generation, backups.
+  # Must be a single instance — never scale this service.
   # ---------------------------------------------------------------------------
   scheduler:
-    <<: *frappe-build
-    command: bench schedule
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
+    <<: *custom_image
+    command:
+      - bench
+      - schedule
     depends_on:
-      <<: *depends-ready
       configurator:
         condition: service_completed_successfully
+        required: true
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - wait-for-it
+        - "redis-queue:6379"
+      interval: 2s
+      timeout: 10s
+      retries: 30
 
   # ---------------------------------------------------------------------------
-  # QUEUE WORKERS
-  # rq workers consuming Frappe's job queues from Redis.
-  # Dokploy uses plain Compose — not Swarm — so deploy.replicas is ignored.
-  # Scale by adding named sibling services (queue-short-2 etc.) if needed.
-  #
-  # short:    email sends, webhooks, lightweight form triggers
-  # long:     report generation, data imports, bulk operations
-  # default:  general purpose fallback
+  # QUEUE WORKERS — rq workers consuming from Redis
+  # default: general purpose jobs
+  # short:   lightweight tasks (email sends, webhooks, form triggers)
+  # long:    heavy tasks (report generation, data imports, bulk operations)
   # ---------------------------------------------------------------------------
-  queue-short:
-    <<: *frappe-build
-    command: bench worker --queue short
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
+  queue-default:
+    <<: *custom_image
+    command:
+      - bench
+      - worker
+      - --queue
+      - default
     depends_on:
-      <<: *depends-ready
       configurator:
         condition: service_completed_successfully
+        required: true
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - wait-for-it
+        - "redis-queue:6379"
+      interval: 2s
+      timeout: 10s
+      retries: 30
+
+  queue-short:
+    <<: *custom_image
+    command:
+      - bench
+      - worker
+      - --queue
+      - short
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+        required: true
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    networks:
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - wait-for-it
+        - "redis-queue:6379"
+      interval: 2s
+      timeout: 10s
+      retries: 30
 
   queue-long:
-    <<: *frappe-build
-    command: bench worker --queue long
-    environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
+    <<: *custom_image
+    command:
+      - bench
+      - worker
+      - --queue
+      - long
     depends_on:
-      <<: *depends-ready
       configurator:
         condition: service_completed_successfully
+        required: true
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - wait-for-it
+        - "redis-queue:6379"
+      interval: 2s
+      timeout: 10s
+      retries: 30
 
-  queue-default:
-    <<: *frappe-build
-    command: bench worker --queue default
+  # ---------------------------------------------------------------------------
+  # CONFIGURATOR — one-shot config writer
+  # Writes common_site_config.json with DB and Redis connection details.
+  # Idempotent: exits immediately if db_host is already set.
+  # REGENERATE_APPS_TXT=1 forces rewrite of sites/apps.txt.
+  #
+  # Trigger:  Set CONFIGURE=1 in Dokploy env tab and redeploy.
+  #           Set back to CONFIGURE=0 after it completes.
+  # ---------------------------------------------------------------------------
+  configurator:
+    <<: *custom_image
+    deploy:
+      mode: replicated
+      replicas: ${CONFIGURE:-0}
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        [[ $${REGENERATE_APPS_TXT} == "1" ]] && ls -1 apps > sites/apps.txt;
+        [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && exit 0;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
     environment:
-      <<: *frappe-env
-    volumes: *frappe-volumes
-    depends_on:
-      <<: *depends-ready
-      configurator:
-        condition: service_completed_successfully
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+      REGENERATE_APPS_TXT: ${REGENERATE_APPS_TXT:-0}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
 
   # ---------------------------------------------------------------------------
-  # MARIADB
-  # Dedicated instance — one per brand, never shared across brands in prod.
-  # Port 3306 intentionally NOT published to the host.
+  # CREATE-SITE — one-shot site creation + app installation
+  # Runs bench new-site and installs apps defined in INSTALL_APP_ARGS.
+  # Waits for common_site_config.json to be populated before proceeding.
+  # Skips if the site directory already exists (idempotent).
+  #
+  # Trigger:  Set CREATE_SITE=1 in Dokploy env tab and redeploy.
+  #           Requires CONFIGURE=0 (configurator must have already run).
+  #           Set back to CREATE_SITE=0 after site is created.
+  #
+  # Example INSTALL_APP_ARGS:
+  #   --install-app erpnext --install-app hrms --install-app crm
   # ---------------------------------------------------------------------------
-  mariadb:
+  create-site:
+    <<: *custom_image
+    deploy:
+      mode: replicated
+      replicas: ${CREATE_SITE:-0}
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        wait-for-it -t 120 $$DB_HOST:$$DB_PORT;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] &&
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] &&
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Waiting for sites/common_site_config.json ...";
+          sleep 5;
+          if (( `date +%s`-start > 120 )); then
+            echo "Timed out waiting for common_site_config.json";
+            exit 1;
+          fi
+        done;
+        [[ -d "sites/$${SITE_NAME}" ]] && echo "$${SITE_NAME} already exists" && exit 0;
+        bench new-site \
+          --mariadb-user-host-login-scope='%' \
+          --admin-password=$${ADMIN_PASSWORD} \
+          --db-root-username=root \
+          --db-root-password=$${DB_ROOT_PASSWORD} \
+          $${INSTALL_APP_ARGS} \
+          $${SITE_NAME};
+    environment:
+      SITE_NAME: ${SITE_NAME:-erp.brazenhalo.com}
+      # [SECRET] Set in Dokploy
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      # [SECRET] Set in Dokploy
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
+      # Space-separated --install-app flags, e.g.:
+      #   --install-app erpnext --install-app hrms --install-app crm
+      INSTALL_APP_ARGS: ${INSTALL_APP_ARGS:---install-app erpnext}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    networks:
+      - bench-network
+
+  # ---------------------------------------------------------------------------
+  # MIGRATION — one-shot bench migrate runner
+  # Runs bench migrate across all sites. Use on every image upgrade that
+  # contains schema changes.
+  # Puts sites into maintenance mode during migration, restores after.
+  #
+  # Trigger:  Set MIGRATE=1 in Dokploy env tab and redeploy.
+  #           Set back to MIGRATE=0 after migrations complete.
+  # ---------------------------------------------------------------------------
+  migration:
+    <<: *custom_image
+    deploy:
+      mode: replicated
+      replicas: ${MIGRATE:-0}
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        bench --site all set-config -p maintenance_mode 1;
+        bench --site all set-config -p pause_scheduler 1;
+        bench --site all migrate;
+        bench --site all set-config -p maintenance_mode 0;
+        bench --site all set-config -p pause_scheduler 0;
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    networks:
+      - bench-network
+
+  # ---------------------------------------------------------------------------
+  # MARIADB — dedicated database instance for this brand
+  # Never shared with other brands in production.
+  # Port 3306 is NOT published to the host — internal network only.
+  #
+  # Toggle:  Set ENABLE_DB=1 to start (default: 0 to allow external DB use).
+  #          For production with a local DB, set ENABLE_DB=1 permanently.
+  # ---------------------------------------------------------------------------
+  db:
     image: mariadb:10.6
+    deploy:
+      mode: replicated
+      replicas: ${ENABLE_DB:-1}
+      restart_policy:
+        condition: always
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -310,117 +394,137 @@ services:
       - --wait-timeout=28800
       - --interactive-timeout=28800
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
-      MYSQL_USER: ${MYSQL_USER:-frappe}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in Dokploy}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
+      # [SECRET] Set in Dokploy
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     volumes:
-      - bh-mariadb-data:/var/lib/mysql
-      - bh-mariadb-conf:/etc/mysql/conf.d
+      - db-data:/var/lib/mysql
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
     healthcheck:
-      # Reads from credentials file — password never appears in process args
-      # or docker inspect output. File is written by mariadb-init below.
-      test: ["CMD", "mysqladmin", "ping", "--defaults-file=/etc/mysql/conf.d/healthcheck.cnf", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 40s
-
-  # Writes /etc/mysql/conf.d/healthcheck.cnf before MariaDB healthcheck fires.
-  # One-shot — never restarts.
-  mariadb-init:
-    image: busybox:latest
-    command: >
-      sh -c "
-        printf '[client]\nuser=root\npassword=%s\n' \"$$MYSQL_ROOT_PASSWORD\"
-          > /conf/healthcheck.cnf &&
-        chmod 600 /conf/healthcheck.cnf &&
-        echo '[mariadb-init] Credentials file written.'
-      "
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
-    volumes:
-      - bh-mariadb-conf:/conf
-    networks:
-      - bh-internal
-    restart: "no"
+      test: mysqladmin ping -h localhost --password=${DB_ROOT_PASSWORD}
+      interval: 1s
+      retries: 20
 
   # ---------------------------------------------------------------------------
   # REDIS — CACHE
-  # LRU eviction, no persistence. Safe to lose — Frappe rebuilds on restart.
+  # LRU page cache. No persistence — safe to lose on restart.
   # ---------------------------------------------------------------------------
   redis-cache:
-    image: redis:7-alpine
-    command: >
-      redis-server
-      --maxmemory ${REDIS_CACHE_MAXMEMORY:-256mb}
-      --maxmemory-policy allkeys-lru
-      --save ""
-      --appendonly no
+    image: redis:6.2-alpine
+    deploy:
+      restart_policy:
+        condition: always
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_CACHE_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     volumes:
-      - bh-redis-cache-data:/data
+      - redis-cache-data:/data
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
 
   # ---------------------------------------------------------------------------
   # REDIS — QUEUE
-  # noeviction + AOF persistence. Queued background jobs must survive restarts.
+  # rq job queue broker. AOF persistence keeps queued jobs across restarts.
   # ---------------------------------------------------------------------------
   redis-queue:
-    image: redis:7-alpine
-    command: >
-      redis-server
-      --maxmemory ${REDIS_QUEUE_MAXMEMORY:-128mb}
-      --maxmemory-policy noeviction
-      --appendonly yes
-      --appendfilename appendonly.aof
+    image: redis:6.2-alpine
+    deploy:
+      restart_policy:
+        condition: always
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_QUEUE_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfilename
+      - appendonly.aof
     volumes:
-      - bh-redis-queue-data:/data
+      - redis-queue-data:/data
     networks:
-      - bh-internal
-    restart: unless-stopped
+      - bench-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # REDIS — SOCKETIO
+  # Used by Frappe's websocket layer for pub/sub. Mapped to REDIS_QUEUE URL
+  # in common_site_config.json for backward compatibility.
+  # ---------------------------------------------------------------------------
+  redis-socketio:
+    image: redis:6.2-alpine
+    deploy:
+      restart_policy:
+        condition: always
+    volumes:
+      - redis-socketio-data:/data
+    networks:
+      - bench-network
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
 
 # =============================================================================
 # VOLUMES
 # All prefixed bh- to avoid collision on shared non-prod nodes where multiple
-# brand stacks may run on the same Docker host.
+# brand stacks run on the same Docker host.
+#
+# sites volume supports external mounts (NFS, bind) via SITE_VOLUME_* vars.
+# For local storage (prod dedicated server), leave all SITE_VOLUME_* empty
+# and Docker will create a standard named volume automatically.
 # =============================================================================
 volumes:
-  bh-sites:
-    driver: local
-  bh-logs:
-    driver: local
-  bh-mariadb-data:
-    driver: local
-  bh-mariadb-conf:
-    driver: local
-  bh-redis-cache-data:
-    driver: local
-  bh-redis-queue-data:
-    driver: local
+  db-data:
+    name: bh-db-data
+  redis-cache-data:
+    name: bh-redis-cache-data
+  redis-queue-data:
+    name: bh-redis-queue-data
+  redis-socketio-data:
+    name: bh-redis-socketio-data
+  sites:
+    name: bh-sites
+    driver_opts:
+      type: "${SITE_VOLUME_TYPE:-none}"
+      o: "${SITE_VOLUME_OPTS:-bind}"
+      device: "${SITE_VOLUME_DEV:-/data/bh/sites}"
 
 # =============================================================================
 # NETWORKS
-# bh-internal: isolated bridge — internal: true blocks internet egress from
-#              app services. MariaDB and Redis unreachable from outside.
-# No external proxy network — Dokploy attaches its Traefik network
-# automatically when you configure the application domain in its UI.
+# bench-network: all services communicate here — isolated per brand stack.
+# Dokploy attaches its Traefik proxy network to `frontend` automatically
+# when you configure the domain in the Dokploy application UI.
 # =============================================================================
 networks:
-  bh-internal:
+  bench-network:
+    name: bh-bench-network
     driver: bridge
-    internal: true

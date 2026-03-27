@@ -1,0 +1,411 @@
+# =============================================================================
+# ERPNext — BrazenHalo
+# Brand:       BRAZENHALO
+# Source:      Pulled by Dokploy from Git (brands/brazenhalo/docker-compose.yml)
+# Image:       Official frappe/erpnext from Docker Hub — no local build
+# Environments: dev | test | demo | prod — controlled via ENVIRONMENT var
+#
+# HOW DOKPLOY USES THIS FILE:
+#   1. Dokploy pulls this file from your Git repo on every deploy trigger.
+#   2. Dokploy injects all [SECRET] variables from its own env var store.
+#   3. Dokploy manages the reverse proxy (Traefik) separately — do NOT add
+#      Traefik labels here; configure the domain in the Dokploy application UI.
+#   4. IMAGE_TAG is set per-environment in Dokploy to enforce immutable deploys.
+#
+# ENVIRONMENT DEFAULTS (override per environment in Dokploy):
+#   dev:   IMAGE_TAG=latest, relaxed resources, FRAPPE_SITE_NAME=bh-dev.internal
+#   test:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=bh-test.internal
+#   demo:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=bh-demo.internal
+#   prod:  IMAGE_TAG=<pinned>, FRAPPE_SITE_NAME=erp.brazenhalo.com
+# =============================================================================
+
+x-image: &image
+  image: frappe/erpnext:${IMAGE_TAG:-version-15}
+
+# Env vars shared by every Frappe process (backend, workers, scheduler, ws)
+x-frappe-env: &frappe-env
+  # --- Site identity [CONFIG: set per environment in Dokploy] ---
+  FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
+  # --- Database [CONFIG: host is always the internal service name] ---
+  DB_HOST: mariadb
+  DB_PORT: "3306"
+  # --- Database credentials [SECRET: set in Dokploy — never commit values] ---
+  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
+  MYSQL_USER: ${MYSQL_USER:-frappe}
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in Dokploy}
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
+  # --- Redis [CONFIG: internal service names, fixed] ---
+  REDIS_CACHE: redis-cache:6379
+  REDIS_QUEUE: redis-queue:6379
+  # --- Admin [SECRET: set in Dokploy] ---
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
+  # --- Apps to install on first boot [CONFIG] ---
+  INSTALL_APPS: ${INSTALL_APPS:-erpnext}
+
+# Healthcheck gate reused by all Frappe app services
+x-depends-ready: &depends-ready
+  mariadb:
+    condition: service_healthy
+  redis-cache:
+    condition: service_healthy
+  redis-queue:
+    condition: service_healthy
+
+# Shared volume mounts for all Frappe app services
+x-frappe-volumes: &frappe-volumes
+  - bh-sites:/home/frappe/frappe-bench/sites
+  - bh-logs:/home/frappe/frappe-bench/logs
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # CONFIGURATOR
+  # One-shot init container. Runs before any Frappe service starts.
+  #
+  # First boot:  creates the site, installs apps defined in INSTALL_APPS.
+  # Subsequent:  detects existing site_config.json, runs bench migrate only.
+  #
+  # Dokploy behaviour: this service runs on every redeploy. The site-exists
+  # check makes it idempotent — safe to re-run on config-only changes.
+  # ---------------------------------------------------------------------------
+  configurator:
+    <<: *image
+    command: >
+      bash -c "
+        echo '[configurator] Waiting for MariaDB...' &&
+        wait-for-it mariadb:3306 --timeout=120 --strict &&
+        echo '[configurator] Waiting for Redis...' &&
+        wait-for-it redis-cache:6379 --timeout=30 --strict &&
+        wait-for-it redis-queue:6379 --timeout=30 --strict &&
+        SITE_CONFIG=/home/frappe/frappe-bench/sites/$$FRAPPE_SITE_NAME/site_config.json &&
+        if [ ! -f $$SITE_CONFIG ]; then
+          echo '[configurator] First boot — creating site...' &&
+          bench new-site $$FRAPPE_SITE_NAME
+            --mariadb-root-password $$MYSQL_ROOT_PASSWORD
+            --admin-password $$ADMIN_PASSWORD
+            --db-type mariadb
+            --db-host mariadb
+            --db-port 3306
+            --no-mariadb-socket &&
+          echo '[configurator] Installing apps: '$$INSTALL_APPS &&
+          for app in $$(echo $$INSTALL_APPS | tr ',' ' '); do
+            echo \"[configurator] Installing $$app...\" &&
+            bench --site $$FRAPPE_SITE_NAME install-app $$app;
+          done &&
+          echo '[configurator] First boot complete.';
+        else
+          echo '[configurator] Site exists — running migrations...' &&
+          bench --site $$FRAPPE_SITE_NAME migrate &&
+          echo '[configurator] Migrations complete.';
+        fi
+      "
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    networks:
+      - bh-internal
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # BACKEND
+  # Gunicorn WSGI server. Starts only after configurator succeeds.
+  # Not exposed directly — frontend (nginx) proxies to it.
+  # ---------------------------------------------------------------------------
+  backend:
+    <<: *image
+    command: bench serve --port 8000
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/method/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # FRONTEND
+  # Nginx — serves JS/CSS assets and reverse-proxies to backend + websocket.
+  #
+  # Dokploy proxy integration:
+  #   Do NOT add Traefik labels here. In the Dokploy application UI, set:
+  #     Domain:   erp.brazenhalo.com  (or bh-dev.internal for dev)
+  #     Port:     8080
+  #     HTTPS:    enabled (Dokploy manages cert via its Traefik instance)
+  #   Dokploy will attach its own Traefik labels automatically.
+  # ---------------------------------------------------------------------------
+  frontend:
+    <<: *image
+    command: nginx-entrypoint.sh
+    environment:
+      FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:?FRAPPE_SITE_NAME must be set in Dokploy}
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
+      UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
+      UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
+      FRAPPE_SITE_NAME_HEADER: $$host
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    ports:
+      # Dokploy detects this port and wires its Traefik proxy to it.
+      # Change FRONTEND_PORT per environment if running multiple stacks
+      # on the same non-prod node (dev=8080, test=8081, demo=8082).
+      - "${FRONTEND_PORT:-8080}:8080"
+    volumes:
+      - bh-sites:/home/frappe/frappe-bench/sites:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      websocket:
+        condition: service_started
+    networks:
+      - bh-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # WEBSOCKET
+  # Node.js socketio — Frappe realtime (live form updates, notifications).
+  # ---------------------------------------------------------------------------
+  websocket:
+    <<: *image
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # SCHEDULER
+  # Frappe APScheduler — email queue flush, background job triggers,
+  # scheduled reports. Must be a single instance (not scaled).
+  # ---------------------------------------------------------------------------
+  scheduler:
+    <<: *image
+    command: bench schedule
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # QUEUE WORKERS
+  # rq workers. Dokploy runs plain Compose (not Swarm), so worker count is
+  # controlled by running named duplicate services rather than deploy.replicas.
+  #
+  # To scale: add queue-short-2, queue-short-3 etc. with identical config,
+  # or increase counts by duplicating the service block per environment.
+  #
+  # short:   fast jobs — email sends, webhooks, form triggers
+  # long:    slow jobs — report generation, data imports, print formats
+  # default: everything else
+  # ---------------------------------------------------------------------------
+  queue-short:
+    <<: *image
+    command: bench worker --queue short
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+
+  queue-long:
+    <<: *image
+    command: bench worker --queue long
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+
+  queue-default:
+    <<: *image
+    command: bench worker --queue default
+    environment:
+      <<: *frappe-env
+    volumes: *frappe-volumes
+    depends_on:
+      <<: *depends-ready
+      configurator:
+        condition: service_completed_successfully
+    networks:
+      - bh-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MARIADB
+  # Dedicated instance — never shared with other brands.
+  # Port 3306 is NOT published to the host. Internal network only.
+  #
+  # Credentials file pattern: avoids embedding MYSQL_ROOT_PASSWORD in the
+  # healthcheck command string (which would expose it in `docker inspect`).
+  # ---------------------------------------------------------------------------
+  mariadb:
+    image: mariadb:10.6
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      - --innodb-buffer-pool-size=${MARIADB_INNODB_BUFFER_POOL_SIZE:-512M}
+      - --innodb-log-file-size=256M
+      - --max-allowed-packet=64M
+      - --wait-timeout=28800
+      - --interactive-timeout=28800
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
+      MYSQL_USER: ${MYSQL_USER:-frappe}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set in Dokploy}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-_frappe_brazenhalo}
+    volumes:
+      - bh-mariadb-data:/var/lib/mysql
+      # Credentials file so healthcheck never exposes the password in
+      # process arguments or `docker inspect` output.
+      - bh-mariadb-conf:/etc/mysql/conf.d
+    networks:
+      - bh-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--defaults-file=/etc/mysql/conf.d/healthcheck.cnf", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # mariadb-init writes the credentials file into the shared conf volume
+  # before the healthcheck fires. One-shot, never restarts.
+  mariadb-init:
+    image: busybox:latest
+    command: >
+      sh -c "
+        echo '[client]' > /conf/healthcheck.cnf &&
+        echo 'user=root' >> /conf/healthcheck.cnf &&
+        echo \"password=$$MYSQL_ROOT_PASSWORD\" >> /conf/healthcheck.cnf &&
+        chmod 600 /conf/healthcheck.cnf &&
+        echo '[mariadb-init] Credentials file written.'
+      "
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in Dokploy}
+    volumes:
+      - bh-mariadb-conf:/conf
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # REDIS — CACHE
+  # LRU eviction, no persistence. Cache loss is safe — Frappe rebuilds it.
+  # ---------------------------------------------------------------------------
+  redis-cache:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory ${REDIS_CACHE_MAXMEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    volumes:
+      - bh-redis-cache-data:/data
+    networks:
+      - bh-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # REDIS — QUEUE
+  # noeviction + AOF persistence. Queued jobs must survive a restart.
+  # ---------------------------------------------------------------------------
+  redis-queue:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory ${REDIS_QUEUE_MAXMEMORY:-128mb}
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfilename appendonly.aof
+    volumes:
+      - bh-redis-queue-data:/data
+    networks:
+      - bh-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+# =============================================================================
+# VOLUMES
+# Prefixed bh- to avoid collision on shared non-prod nodes where multiple
+# brand stacks run on the same Docker host.
+# =============================================================================
+volumes:
+  bh-sites:
+    driver: local
+  bh-logs:
+    driver: local
+  bh-mariadb-data:
+    driver: local
+  bh-mariadb-conf:
+    driver: local
+  bh-redis-cache-data:
+    driver: local
+  bh-redis-queue-data:
+    driver: local
+
+# =============================================================================
+# NETWORKS
+# bh-internal: isolated bridge — no internet egress from app services.
+#              MariaDB and Redis are reachable only from within this network.
+# No external proxy network defined here — Dokploy manages Traefik's network
+# attachment automatically when you configure the domain in its UI.
+# =============================================================================
+networks:
+  bh-internal:
+    driver: bridge
+    internal: true

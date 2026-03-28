@@ -61,6 +61,12 @@ RUN useradd -ms /bin/bash frappe
 USER frappe
 WORKDIR /home/frappe
 
+# ── Global .yarnrc — skip optional deps that don't apply to this platform ─────
+# Prevents failures when app yarn.lock files were committed from Windows and
+# contain platform-specific optional deps (e.g. @rollup/rollup-win32-*) that
+# are absent from the Linux yarn cache.
+RUN echo 'ignore-optional true' > /home/frappe/.yarnrc
+
 # ── Python via uv ─────────────────────────────────────────────────────────────
 # uv manages its own Python installation. bench init will create its own
 # virtualenv with its own pip — no need to install or upgrade pip here.

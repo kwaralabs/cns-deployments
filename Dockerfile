@@ -85,13 +85,12 @@ RUN /home/frappe/.local/bin/uv tool install frappe-bench \
     && /home/frappe/.local/bin/bench --version
 
 # ── Decode apps.json ──────────────────────────────────────────────────────────
-# Official frappe_docker pattern: APPS_JSON_BASE64 → /opt/frappe/apps.json
-# bench init --apps_path then clones all listed apps in one pass.
+# Written to /home/frappe (frappe-owned) rather than /opt (root-owned).
+# This step runs as frappe (USER frappe is already set above).
 RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
-        mkdir -p /opt/frappe && \
-        printf '%s' "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json && \
+        printf '%s' "${APPS_JSON_BASE64}" | base64 -d > /home/frappe/apps.json && \
         echo "--- apps.json decoded ---" && \
-        cat /opt/frappe/apps.json && \
+        cat /home/frappe/apps.json && \
         echo "--- end apps.json ---"; \
     fi
 
@@ -101,8 +100,8 @@ RUN bash -c " \
     PYTHON_BIN=\$( /home/frappe/.local/bin/uv python find ${PYTHON_VERSION} ) && \
     echo \"Using Python: \${PYTHON_BIN}\" && \
     APP_INSTALL_ARGS='' && \
-    if [ -f /opt/frappe/apps.json ]; then \
-        APP_INSTALL_ARGS='--apps_path /opt/frappe/apps.json'; \
+    if [ -f /home/frappe/apps.json ]; then \
+        APP_INSTALL_ARGS='--apps_path /home/frappe/apps.json'; \
     fi && \
     /home/frappe/.local/bin/bench init \${APP_INSTALL_ARGS} \
         --frappe-branch ${FRAPPE_BRANCH} \

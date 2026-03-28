@@ -198,4 +198,3 @@ RUN /home/frappe/.local/bin/bench --version \
     && yarn --version
 
 CMD ["bench", "serve", "--port", "8000"]
-`

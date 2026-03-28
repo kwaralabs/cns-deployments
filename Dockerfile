@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmariadb-dev \
     pkg-config \
     xz-utils \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
 # ── frappe user — bench must never run as root ────────────────────────────────

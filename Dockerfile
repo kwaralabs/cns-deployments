@@ -105,7 +105,11 @@ RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
         echo "--- end apps.json ---"; \
     fi
 
-# ── bench init: clone frappe + all apps ───────────────────────────────────────
+# ── bench init: clone frappe + all apps, skip internal asset build ─────────────
+# --skip-assets prevents bench from running `bench build` internally, which
+# would fail because common_site_config.json is empty at this point and CRM's
+# socket.js requires socketio_port to be defined at Rollup/Vite build time.
+# We run our own controlled build in the next step after writing the config.
 RUN bash -c " \
     source ${NVM_DIR}/nvm.sh && \
     PYTHON_BIN=\$( /home/frappe/.local/bin/uv python find ${PYTHON_VERSION} ) && \
@@ -118,6 +122,7 @@ RUN bash -c " \
         --frappe-branch ${FRAPPE_BRANCH} \
         --frappe-path ${FRAPPE_PATH} \
         --skip-redis-config-generation \
+        --skip-assets \
         --python \${PYTHON_BIN} \
         --verbose \
         frappe-bench && \

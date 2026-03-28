@@ -112,14 +112,24 @@ RUN bash -c " \
         --verbose \
         frappe-bench && \
     cd frappe-bench && \
-    echo '{}' > sites/common_site_config.json && \
     find apps -mindepth 1 -path '*/.git' | xargs rm -rf"
+
+# ── Write common_site_config.json with socketio_port for asset build ──────────
+# CRM's socket.js imports socketio_port from this file at Rollup/Vite build
+# time. An empty {} causes a RollupError. We set a real value for the build,
+# then reset to a clean runtime config after assets are compiled.
+RUN echo '{"socketio_port": 9000}' \
+    > /home/frappe/frappe-bench/sites/common_site_config.json
 
 # ── Compile production JS/CSS assets ──────────────────────────────────────────
 RUN bash -c " \
     source ${NVM_DIR}/nvm.sh && \
     cd frappe-bench && \
     /home/frappe/.local/bin/bench build --production"
+
+# ── Reset common_site_config.json to empty for runtime ────────────────────────
+# The actual value is injected by the entrypoint at container start.
+RUN echo '{}' > /home/frappe/frappe-bench/sites/common_site_config.json
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime
@@ -140,7 +150,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo \
     libpng16-16 \
     xvfb \
-    # wkhtmltopdf hard dependencies (must be present before the .deb install)
     fontconfig \
     xfonts-75dpi \
     xfonts-base \
@@ -189,3 +198,4 @@ RUN /home/frappe/.local/bin/bench --version \
     && yarn --version
 
 CMD ["bench", "serve", "--port", "8000"]
+`

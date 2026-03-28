@@ -38,6 +38,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV NVM_DIR=/home/frappe/.nvm
 # PATH gets nvm's default alias symlink — works regardless of resolved patch version
 ENV PATH="/home/frappe/.local/bin:/home/frappe/.nvm/alias/default/bin:$PATH"
+# Force yarn to skip optional deps and engine checks globally for all invocations,
+# including those spawned by bench internals. This prevents failures caused by
+# app yarn.lock files committed from Windows containing platform-specific optional
+# deps (e.g. @rollup/rollup-win32-*) that don't exist in the Linux yarn cache.
+ENV YARN_IGNORE_OPTIONAL=true
+ENV YARN_IGNORE_ENGINES=true
 
 # ── System build deps ─────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -61,11 +67,9 @@ RUN useradd -ms /bin/bash frappe
 USER frappe
 WORKDIR /home/frappe
 
-# ── Global .yarnrc — skip optional deps that don't apply to this platform ─────
-# Prevents failures when app yarn.lock files were committed from Windows and
-# contain platform-specific optional deps (e.g. @rollup/rollup-win32-*) that
-# are absent from the Linux yarn cache.
-RUN echo 'ignore-optional true' > /home/frappe/.yarnrc
+# ── Global .yarnrc — belt-and-suspenders alongside the ENV vars above ─────────
+# Some yarn versions read .yarnrc preferentially over environment variables.
+RUN printf 'ignore-optional true\nignore-engines true\n' > /home/frappe/.yarnrc
 
 # ── Python via uv ─────────────────────────────────────────────────────────────
 # uv manages its own Python installation. bench init will create its own

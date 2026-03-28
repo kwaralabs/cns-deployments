@@ -38,11 +38,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV NVM_DIR=/home/frappe/.nvm
 # PATH gets nvm's default alias symlink — works regardless of resolved patch version
 ENV PATH="/home/frappe/.local/bin:/home/frappe/.nvm/alias/default/bin:$PATH"
-# Force yarn to skip optional deps and engine checks globally for all invocations,
-# including those spawned by bench internals. This prevents failures caused by
-# app yarn.lock files committed from Windows containing platform-specific optional
-# deps (e.g. @rollup/rollup-win32-*) that don't exist in the Linux yarn cache.
-ENV YARN_IGNORE_OPTIONAL=true
+# Prevent yarn engine checks from failing due to mismatched Node version
+# declarations in app package.json files.
 ENV YARN_IGNORE_ENGINES=true
 
 # ── System build deps ─────────────────────────────────────────────────────────
@@ -67,21 +64,24 @@ RUN useradd -ms /bin/bash frappe
 USER frappe
 WORKDIR /home/frappe
 
-# ── Global .yarnrc — belt-and-suspenders alongside the ENV vars above ─────────
-# Some yarn versions read .yarnrc preferentially over environment variables.
-RUN printf 'ignore-optional true\nignore-engines true\n' > /home/frappe/.yarnrc
+# ── Global .yarnrc ────────────────────────────────────────────────────────────
+# ignore-engines: suppress Node version mismatch warnings/errors from apps
+#   whose package.json engines field doesn't match our Node 24.
+# NOTE: ignore-optional is intentionally NOT set here. The Linux-native Rollup
+#   binary (@rollup/rollup-linux-x64-gnu) is an optional dep that IS required
+#   on Linux. Setting ignore-optional strips it and breaks vite builds.
+#   Windows-specific optional packages (@rollup/rollup-win32-*) that appear
+#   in yarn.lock files committed from Windows are handled by purging them from
+#   the yarn cache after bench init (see RUN step below).
+RUN printf 'ignore-engines true\n' > /home/frappe/.yarnrc
 
 # ── Python via uv ─────────────────────────────────────────────────────────────
-# uv manages its own Python installation. bench init will create its own
-# virtualenv with its own pip — no need to install or upgrade pip here.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && /home/frappe/.local/bin/uv python install ${PYTHON_VERSION} --default \
     && /home/frappe/.local/bin/uv python pin ${PYTHON_VERSION} \
     && python --version
 
 # ── Node.js via nvm ───────────────────────────────────────────────────────────
-# nvm install <major> resolves to the latest LTS patch for that major.
-# We source nvm.sh in every subsequent RUN that needs node/yarn.
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 RUN bash -c " \
     source ${NVM_DIR}/nvm.sh && \
@@ -96,8 +96,6 @@ RUN /home/frappe/.local/bin/uv tool install frappe-bench \
     && /home/frappe/.local/bin/bench --version
 
 # ── Decode apps.json ──────────────────────────────────────────────────────────
-# Written to /home/frappe (frappe-owned) rather than /opt (root-owned).
-# This step runs as frappe (USER frappe is already set above).
 RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
         printf '%s' "${APPS_JSON_BASE64}" | base64 -d > /home/frappe/apps.json && \
         echo "--- apps.json decoded ---" && \
@@ -109,7 +107,6 @@ RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
 # --skip-assets prevents bench from running `bench build` internally, which
 # would fail because common_site_config.json is empty at this point and CRM's
 # socket.js requires socketio_port to be defined at Rollup/Vite build time.
-# We run our own controlled build in the next step after writing the config.
 RUN bash -c " \
     source ${NVM_DIR}/nvm.sh && \
     PYTHON_BIN=\$( /home/frappe/.local/bin/uv python find ${PYTHON_VERSION} ) && \
@@ -129,10 +126,23 @@ RUN bash -c " \
     cd frappe-bench && \
     find apps -mindepth 1 -path '*/.git' | xargs rm -rf"
 
+# ── Purge Windows-specific optional packages from yarn cache ──────────────────
+# Some app yarn.lock files are committed from Windows and contain entries for
+# platform-specific optional packages (e.g. @rollup/rollup-win32-*,
+# @swc/core-win32-*, esbuild-windows-*) that don't exist in the Linux yarn
+# cache. When yarn --check-files runs during bench build it tries to validate
+# these and fails with ENOENT on the missing .yarn-metadata.json files.
+# Deleting the Windows cache entries lets yarn skip them cleanly without
+# needing ignore-optional (which would also strip the required Linux natives).
+RUN find /home/frappe/.cache/yarn -type d \( \
+        -name '*win32*' \
+        -o -name '*windows*' \
+        -o -name '*darwin*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+
 # ── Write common_site_config.json with socketio_port for asset build ──────────
 # CRM's socket.js imports socketio_port from this file at Rollup/Vite build
-# time. An empty {} causes a RollupError. We set a real value for the build,
-# then reset to a clean runtime config after assets are compiled.
+# time. An empty {} causes a RollupError.
 RUN echo '{"socketio_port": 9000}' \
     > /home/frappe/frappe-bench/sites/common_site_config.json
 
@@ -143,13 +153,10 @@ RUN bash -c " \
     /home/frappe/.local/bin/bench build --production"
 
 # ── Reset common_site_config.json to empty for runtime ────────────────────────
-# The actual value is injected by the entrypoint at container start.
 RUN echo '{}' > /home/frappe/frappe-bench/sites/common_site_config.json
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime
-# Lean final image — runtime deps only, no compilers, no build toolchain.
-# Copies the fully-built bench directory, uv Python, and nvm Node from builder.
 # -----------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
@@ -178,10 +185,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── wkhtmltopdf 0.12.6 with patched Qt ───────────────────────────────────────
-# The apt package (0.12.6-2) is unpatched and breaks Frappe PDF generation.
-# Must install from the official wkhtmltopdf project release.
-# Note: --no-install-recommends is intentionally omitted here — the .deb
-# resolver requires it absent to correctly satisfy wkhtmltox dependencies.
 RUN curl -fsSL \
     https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
     -o /tmp/wkhtmltox.deb \
@@ -190,7 +193,7 @@ RUN curl -fsSL \
     && rm -rf /var/lib/apt/lists/* \
     && wkhtmltopdf --version
 
-# ── Recreate frappe user (same UID=1000 as builder stage) ─────────────────────
+# ── Recreate frappe user ───────────────────────────────────────────────────────
 RUN useradd -ms /bin/bash frappe
 
 # ── Copy built artifacts from builder ─────────────────────────────────────────
@@ -206,7 +209,7 @@ COPY --from=builder --chown=frappe:frappe \
 USER frappe
 WORKDIR /home/frappe/frappe-bench
 
-# ── Sanity check — verify all tools are reachable in runtime image ────────────
+# ── Sanity check ──────────────────────────────────────────────────────────────
 RUN /home/frappe/.local/bin/bench --version \
     && python --version \
     && node --version \

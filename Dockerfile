@@ -210,10 +210,12 @@ COPY --from=builder --chown=frappe:frappe \
 USER frappe
 WORKDIR /home/frappe/frappe-bench
 
-# ── Sanity check ──────────────────────────────────────────────────────────────
-RUN /home/frappe/.local/bin/bench --version \
-    && python --version \
-    && node --version \
-    && yarn --version
+# ── Sanity check — verify tools are reachable in runtime image ────────────────
+RUN bash -c " \
+    source /home/frappe/.nvm/nvm.sh && \
+    /home/frappe/.local/bin/bench --version && \
+    python --version && \
+    node --version && \
+    yarn --version"
 
 CMD ["bench", "serve", "--port", "8000"]

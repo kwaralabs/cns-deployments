@@ -167,6 +167,7 @@ ENV FRAPPE_BENCH_ROOT=/home/frappe/frappe-bench
 
 # ── Runtime system deps ───────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     mariadb-client \
     libmagic1 \
     libjpeg62-turbo \

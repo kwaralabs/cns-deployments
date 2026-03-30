@@ -28,10 +28,7 @@
 # =============================================================================
 
 x-custom-image: &custom_image
-  # IMAGE_NAME and IMAGE_TAG are set in Dokploy Build tab.
-  # Dokploy builds from ./Dockerfile and tags the result as IMAGE_NAME:IMAGE_TAG.
-  # PULL_POLICY=missing ensures Dokploy uses the locally built image.
-  image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-base}:${IMAGE_TAG:-dev-v16}
+  image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-base}:${IMAGE_TAG:-latest}
   pull_policy: ${PULL_POLICY:-always}
   deploy:
     restart_policy:
@@ -41,8 +38,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # BACKEND — Gunicorn WSGI server
-  # Serves Frappe API and page rendering. Not exposed externally.
-  # Frontend (nginx) proxies all dynamic requests to this service.
   # ---------------------------------------------------------------------------
   backend:
     <<: *custom_image
@@ -61,13 +56,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # FRONTEND — Nginx reverse proxy
-  # Serves compiled JS/CSS assets directly.
-  # Proxies /api, /app, /assets to backend:8000 and /socket.io to websocket:9000.
-  #
-  # Dokploy domain config (set in Dokploy application UI — NOT via labels here):
-  #   Domain:  erp.brazenhalo.com  (prod) | bh-dev.internal (dev)
-  #   Port:    8080
-  #   HTTPS:   enabled (Dokploy manages TLS via its Traefik instance)
   # ---------------------------------------------------------------------------
   frontend:
     <<: *custom_image
@@ -92,9 +80,6 @@ services:
     volumes:
       - sites:/home/frappe/frappe-bench/sites
     ports:
-      # Dokploy Traefik connects to this port.
-      # Use different FRONTEND_PORT per environment on shared non-prod nodes:
-      #   prod=8080  dev=8080  test=8081  demo=8082
       - "${FRONTEND_PORT:-8080}:8080"
     networks:
       - bench-network
@@ -109,7 +94,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # WEBSOCKET — Node.js Socket.IO server
-  # Handles Frappe realtime: live form updates, notifications, progress bars.
   # ---------------------------------------------------------------------------
   websocket:
     <<: *custom_image
@@ -135,8 +119,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # SCHEDULER — Frappe task scheduler
-  # Triggers periodic jobs: email queue flush, report generation, backups.
-  # Must be a single instance — never scale this service.
   # ---------------------------------------------------------------------------
   scheduler:
     <<: *custom_image
@@ -161,10 +143,7 @@ services:
       retries: 30
 
   # ---------------------------------------------------------------------------
-  # QUEUE WORKERS — rq workers consuming from Redis
-  # default: general purpose jobs
-  # short:   lightweight tasks (email sends, webhooks, form triggers)
-  # long:    heavy tasks (report generation, data imports, bulk operations)
+  # QUEUE WORKERS
   # ---------------------------------------------------------------------------
   queue-default:
     <<: *custom_image
@@ -240,12 +219,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # CONFIGURATOR — one-shot config writer
-  # Writes common_site_config.json with DB and Redis connection details.
-  # Idempotent: exits immediately if db_host is already set.
-  # REGENERATE_APPS_TXT=1 forces rewrite of sites/apps.txt.
-  #
-  # Trigger:  Set CONFIGURE=1 in Dokploy env tab and redeploy.
-  #           Set back to CONFIGURE=0 after it completes.
   # ---------------------------------------------------------------------------
   configurator:
     <<: *custom_image
@@ -279,16 +252,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # CREATE-SITE — one-shot site creation + app installation
-  # Runs bench new-site and installs apps defined in INSTALL_APP_ARGS.
-  # Waits for common_site_config.json to be populated before proceeding.
-  # Skips if the site directory already exists (idempotent).
-  #
-  # Trigger:  Set CREATE_SITE=1 in Dokploy env tab and redeploy.
-  #           Requires CONFIGURE=0 (configurator must have already run).
-  #           Set back to CREATE_SITE=0 after site is created.
-  #
-  # Example INSTALL_APP_ARGS:
-  #   --install-app erpnext --install-app hrms --install-app crm
   # ---------------------------------------------------------------------------
   create-site:
     <<: *custom_image
@@ -325,14 +288,10 @@ services:
           $${SITE_NAME};
     environment:
       SITE_NAME: ${SITE_NAME:-erp.brazenhalo.com}
-      # [SECRET] Set in Dokploy
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-3306}
-      # [SECRET] Set in Dokploy
       DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
-      # Space-separated --install-app flags, e.g.:
-      #   --install-app erpnext --install-app hrms --install-app crm
       INSTALL_APP_ARGS: ${INSTALL_APP_ARGS:---install-app erpnext}
     volumes:
       - sites:/home/frappe/frappe-bench/sites
@@ -341,12 +300,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # MIGRATION — one-shot bench migrate runner
-  # Runs bench migrate across all sites. Use on every image upgrade that
-  # contains schema changes.
-  # Puts sites into maintenance mode during migration, restores after.
-  #
-  # Trigger:  Set MIGRATE=1 in Dokploy env tab and redeploy.
-  #           Set back to MIGRATE=0 after migrations complete.
   # ---------------------------------------------------------------------------
   migration:
     <<: *custom_image
@@ -369,12 +322,7 @@ services:
       - bench-network
 
   # ---------------------------------------------------------------------------
-  # MARIADB — dedicated database instance for this brand
-  # Never shared with other brands in production.
-  # Port 3306 is NOT published to the host — internal network only.
-  #
-  # Toggle:  Set ENABLE_DB=1 to start (default: 0 to allow external DB use).
-  #          For production with a local DB, set ENABLE_DB=1 permanently.
+  # MARIADB
   # ---------------------------------------------------------------------------
   db:
     image: mariadb:10.6
@@ -394,7 +342,6 @@ services:
       - --wait-timeout=28800
       - --interactive-timeout=28800
     environment:
-      # [SECRET] Set in Dokploy
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     volumes:
@@ -408,7 +355,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # REDIS — CACHE
-  # LRU page cache. No persistence — safe to lose on restart.
   # ---------------------------------------------------------------------------
   redis-cache:
     image: redis:6.2-alpine
@@ -440,7 +386,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # REDIS — QUEUE
-  # rq job queue broker. AOF persistence keeps queued jobs across restarts.
   # ---------------------------------------------------------------------------
   redis-queue:
     image: redis:6.2-alpine
@@ -472,8 +417,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # REDIS — SOCKETIO
-  # Used by Frappe's websocket layer for pub/sub. Mapped to REDIS_QUEUE URL
-  # in common_site_config.json for backward compatibility.
   # ---------------------------------------------------------------------------
   redis-socketio:
     image: redis:6.2-alpine
@@ -495,12 +438,8 @@ services:
 
 # =============================================================================
 # VOLUMES
-# All prefixed bh- to avoid collision on shared non-prod nodes where multiple
-# brand stacks run on the same Docker host.
-#
-# sites volume supports external mounts (NFS, bind) via SITE_VOLUME_* vars.
-# For local storage (prod dedicated server), leave all SITE_VOLUME_* empty
-# and Docker will create a standard named volume automatically.
+# All plain named volumes — Docker manages storage locations automatically.
+# No host path dependencies, works on any Dokploy server out of the box.
 # =============================================================================
 volumes:
   db-data:
@@ -513,16 +452,9 @@ volumes:
     name: bh-redis-socketio-data
   sites:
     name: bh-sites
-    driver_opts:
-      type: "${SITE_VOLUME_TYPE:-none}"
-      o: "${SITE_VOLUME_OPTS:-bind}"
-      device: "${SITE_VOLUME_DEV:-/data/bh/sites}"
 
 # =============================================================================
 # NETWORKS
-# bench-network: all services communicate here — isolated per brand stack.
-# Dokploy attaches its Traefik proxy network to `frontend` automatically
-# when you configure the domain in the Dokploy application UI.
 # =============================================================================
 networks:
   bench-network:

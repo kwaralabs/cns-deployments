@@ -79,7 +79,7 @@ NEEDS_PNPM="yes"
 #     "proj|erp.example.com|img-all:1.0.0|hrms crm|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/hrms\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/frappe/crm\",\"branch\":\"main\"}]"
 
 PROJECTS=(
-  "boujeeboyz-one|boujeeboyzjerky.collabnscale.io|customapp-erp-drive:1.0.0|drive|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/kwaralabs/cns-drive\",\"branch\":\"cns-vault-main\"}]"
+  "boujeeboyz-one|boujeeboyzjerky.collabnscale.io|customapp-erp-drive:1.0.0|drive|[{\"url\":\"https://github.com/frappe/erpnext\",\"branch\":\"version-16\"},{\"url\":\"https://github.com/kwaralabs/drive\",\"branch\":\"cns-vault-main\"}]"
 )
 
 ###############################################################################

@@ -6,7 +6,7 @@ To use on a freshly reset VPS. As root on the fresh VPS:
 apt-get update && apt-get install -y curl
 ```
 ```
-curl -o setup.sh 'https://raw.githubusercontent.com/krl-cns/cns-deployment/refs/heads/main/demo/setup-multi-bench-demo.sh'
+curl -o setup.sh 'https://raw.githubusercontent.com/kwaralabs/cns-deployments/refs/heads/main/docker-based-deployments/demo/setup-multi-bench-demo.sh'
 ```
 ```
 chmod +x setup.sh

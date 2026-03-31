@@ -34,6 +34,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl wget gnupg2 ca-certificates \
         software-properties-common \
+        pkg-config \
         mariadb-client libmariadb-dev \
         build-essential gcc g++ make \
         libffi-dev libssl-dev zlib1g-dev \

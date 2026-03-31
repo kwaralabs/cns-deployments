@@ -10,14 +10,6 @@
 #
 # apps.json lives in the same directory as this Dockerfile and is copied
 # directly into the build context — no base64 encoding needed.
-#
-# To add or remove apps, just edit apps.json and redeploy.
-#
-# Build args (all have defaults; override via Dokploy env panel if needed):
-#   FRAPPE_PATH    Frappe git URL
-#   FRAPPE_BRANCH  Frappe branch
-#   PYTHON_VERSION Full Python version string (e.g. 3.14.0)
-#   NODE_VERSION   Full Node version string  (e.g. 24.0.2)
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
@@ -56,8 +48,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.14 python3.14-dev python3.14-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 10 \
-    && python3.14 -m ensurepip --upgrade \
+# ── Bootstrap pip for Python 3.14 cleanly ─────────────────────────────────────
+# Use get-pip.py directly — avoids the conflict between system pip (installed
+# by debian for python3.12) and python3.14's ensurepip trying to overwrite it.
+RUN python3.14 -m ensurepip --altinstall \
     && python3.14 -m pip install --upgrade pip setuptools wheel
 
 # ── Node.js 24 via NVM ────────────────────────────────────────────────────────
@@ -118,21 +112,26 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVM_DIR=/usr/local/nvm
 
 # ── Runtime system packages ───────────────────────────────────────────────────
+# NOTE: Do NOT install python3-pip here — it installs pip for the system
+# python3.12 and conflicts when we bootstrap pip for python3.14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
         software-properties-common \
-        python3-pip \
         mariadb-client libmariadb3 \
         libjpeg8 libpng16-16 libfreetype6 \
         wkhtmltopdf \
         wait-for-it jq gettext-base \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update \
-    && apt-get install -y --no-install-recommends python3.14 python3.14-venv \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 10 \
-    && python3.14 -m ensurepip --upgrade \
-    && python3.14 -m pip install --upgrade pip \
+    && apt-get install -y --no-install-recommends \
+        python3.14 python3.14-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Bootstrap pip for Python 3.14 (runtime stage) ─────────────────────────────
+# --altinstall installs pip3.14 without touching /usr/bin/pip3 or pip,
+# so there is no conflict with any system-managed pip package.
+RUN python3.14 -m ensurepip --altinstall \
+    && python3.14 -m pip install --upgrade pip
 
 # ── Node 24 (needed by socketio.js) ──────────────────────────────────────────
 RUN mkdir -p "$NVM_DIR" \
@@ -143,10 +142,13 @@ RUN mkdir -p "$NVM_DIR" \
 
 ENV PATH="$NVM_DIR/versions/node/v${NODE_VERSION}/bin:$PATH"
 
+# ── frappe-bench CLI ──────────────────────────────────────────────────────────
 RUN python3.14 -m pip install --no-cache-dir frappe-bench
 
+# ── frappe user ───────────────────────────────────────────────────────────────
 RUN useradd -ms /bin/bash frappe
 
+# ── Copy bench from builder ───────────────────────────────────────────────────
 COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
 
 WORKDIR /home/frappe/frappe-bench

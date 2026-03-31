@@ -42,15 +42,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg-dev libpng-dev libfreetype-dev \
         wkhtmltopdf \
         redis-tools gettext-base jq \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main" \
+       > /etc/apt/sources.list.d/deadsnakes.list \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF23C5A6CF475977595C89F51BA6932366A755776" \
+       | gpg --dearmor -o /etc/apt/trusted.gpg.d/deadsnakes.gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3.14 python3.14-dev python3.14-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Bootstrap pip for Python 3.14 cleanly ─────────────────────────────────────
-# Use get-pip.py directly — avoids the conflict between system pip (installed
-# by debian for python3.12) and python3.14's ensurepip trying to overwrite it.
 RUN python3.14 -m ensurepip --altinstall \
     && python3.14 -m pip install --upgrade pip setuptools wheel
 
@@ -72,8 +73,6 @@ RUN useradd -ms /bin/bash frappe
 WORKDIR /home/frappe
 
 # ── Copy apps.json from build context ─────────────────────────────────────────
-# apps.json sits next to this Dockerfile in the repo.
-# Edit it to add/remove apps, then push — Dokploy rebuilds automatically.
 COPY --chown=root:root apps.json /opt/apps.json
 
 # ── bench init ────────────────────────────────────────────────────────────────
@@ -112,8 +111,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVM_DIR=/usr/local/nvm
 
 # ── Runtime system packages ───────────────────────────────────────────────────
-# NOTE: Do NOT install python3-pip here — it installs pip for the system
-# python3.12 and conflicts when we bootstrap pip for python3.14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
         software-properties-common \
@@ -121,15 +118,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg8 libpng16-16 libfreetype6 \
         wkhtmltopdf \
         wait-for-it jq gettext-base \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main" \
+       > /etc/apt/sources.list.d/deadsnakes.list \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF23C5A6CF475977595C89F51BA6932366A755776" \
+       | gpg --dearmor -o /etc/apt/trusted.gpg.d/deadsnakes.gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3.14 python3.14-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Bootstrap pip for Python 3.14 (runtime stage) ─────────────────────────────
-# --altinstall installs pip3.14 without touching /usr/bin/pip3 or pip,
-# so there is no conflict with any system-managed pip package.
 RUN python3.14 -m ensurepip --altinstall \
     && python3.14 -m pip install --upgrade pip
 

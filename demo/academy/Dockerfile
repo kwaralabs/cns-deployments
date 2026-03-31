@@ -127,89 +127,74 @@ RUN useradd -ms /bin/bash frappe
 
 COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
 
-# ── Write nginx-entrypoint.sh ─────────────────────────────────────────────────
-RUN cat > /usr/local/bin/nginx-entrypoint.sh << 'EOF'
-#!/bin/bash
-set -e
-
-BACKEND=${BACKEND:-localhost:8000}
-SOCKETIO=${SOCKETIO:-localhost:9000}
-FRAPPE_SITE_NAME_HEADER=${FRAPPE_SITE_NAME_HEADER:-$host}
-UPSTREAM_REAL_IP_ADDRESS=${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
-UPSTREAM_REAL_IP_HEADER=${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
-UPSTREAM_REAL_IP_RECURSIVE=${UPSTREAM_REAL_IP_RECURSIVE:-off}
-PROXY_READ_TIMEOUT=${PROXY_READ_TIMEOUT:-120}
-CLIENT_MAX_BODY_SIZE=${CLIENT_MAX_BODY_SIZE:-50m}
-
-cat > /etc/nginx/conf.d/default.conf << NGINX
-upstream frappe-server {
-    server ${BACKEND} fail_timeout=0;
-}
-
-upstream frappe-socketio-server {
-    server ${SOCKETIO} fail_timeout=0;
-}
-
-server {
-    listen 8080;
-    server_name _;
-
-    root /home/frappe/frappe-bench/sites;
-
-    real_ip_header ${UPSTREAM_REAL_IP_HEADER};
-    set_real_ip_from ${UPSTREAM_REAL_IP_ADDRESS};
-    real_ip_recursive ${UPSTREAM_REAL_IP_RECURSIVE};
-
-    proxy_read_timeout ${PROXY_READ_TIMEOUT};
-    client_max_body_size ${CLIENT_MAX_BODY_SIZE};
-
-    add_header X-Frame-Options SAMEORIGIN;
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload";
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-
-    location /assets {
-        try_files \$uri =404;
-    }
-
-    location ~ ^/files/.*\.(htm|html|svg|xml) {
-        add_header Content-disposition "attachment";
-        try_files \$uri =404;
-    }
-
-    location /socket.io {
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header X-Frappe-Site-Name ${FRAPPE_SITE_NAME_HEADER};
-        proxy_set_header Origin \$scheme://\$http_host;
-        proxy_set_header Host \$http_host;
-        proxy_pass http://frappe-socketio-server;
-    }
-
-    location / {
-        rewrite ^(.+)/\$ \$1 permanent;
-        rewrite ^(.+)/index\.html\$ \$1 permanent;
-        rewrite ^(.+)\.html\$ \$1 permanent;
-
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Frappe-Site-Name ${FRAPPE_SITE_NAME_HEADER};
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Use-X-Accel-Redirect True;
-        proxy_read_timeout ${PROXY_READ_TIMEOUT};
-        proxy_redirect off;
-        proxy_pass http://frappe-server;
-    }
-}
-NGINX
-
-rm -f /etc/nginx/sites-enabled/default
-exec nginx -g "daemon off;"
-EOF
-
-RUN chmod +x /usr/local/bin/nginx-entrypoint.sh
+# ── Write nginx-entrypoint.sh using printf to avoid heredoc parse issues ──────
+RUN printf '#!/bin/bash\n\
+\n\
+BACKEND=${BACKEND:-localhost:8000}\n\
+SOCKETIO=${SOCKETIO:-localhost:9000}\n\
+FRAPPE_SITE_NAME_HEADER=${FRAPPE_SITE_NAME_HEADER:-$host}\n\
+UPSTREAM_REAL_IP_ADDRESS=${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}\n\
+UPSTREAM_REAL_IP_HEADER=${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}\n\
+UPSTREAM_REAL_IP_RECURSIVE=${UPSTREAM_REAL_IP_RECURSIVE:-off}\n\
+PROXY_READ_TIMEOUT=${PROXY_READ_TIMEOUT:-120}\n\
+CLIENT_MAX_BODY_SIZE=${CLIENT_MAX_BODY_SIZE:-50m}\n\
+\n\
+rm -f /etc/nginx/sites-enabled/default\n\
+\n\
+cat > /etc/nginx/conf.d/frappe.conf << NGINX\n\
+upstream frappe-server {\n\
+    server ${BACKEND} fail_timeout=0;\n\
+}\n\
+upstream frappe-socketio-server {\n\
+    server ${SOCKETIO} fail_timeout=0;\n\
+}\n\
+server {\n\
+    listen 8080;\n\
+    server_name _;\n\
+    root /home/frappe/frappe-bench/sites;\n\
+    real_ip_header ${UPSTREAM_REAL_IP_HEADER};\n\
+    set_real_ip_from ${UPSTREAM_REAL_IP_ADDRESS};\n\
+    real_ip_recursive ${UPSTREAM_REAL_IP_RECURSIVE};\n\
+    proxy_read_timeout ${PROXY_READ_TIMEOUT};\n\
+    client_max_body_size ${CLIENT_MAX_BODY_SIZE};\n\
+    add_header X-Frame-Options SAMEORIGIN;\n\
+    add_header X-Content-Type-Options nosniff;\n\
+    location /assets {\n\
+        try_files \$uri =404;\n\
+    }\n\
+    location ~ ^/files/.*\.(htm|html|svg|xml) {\n\
+        add_header Content-disposition "attachment";\n\
+        try_files \$uri =404;\n\
+    }\n\
+    location /socket.io {\n\
+        proxy_http_version 1.1;\n\
+        proxy_buffering off;\n\
+        proxy_set_header Upgrade \$http_upgrade;\n\
+        proxy_set_header Connection "Upgrade";\n\
+        proxy_set_header X-Frappe-Site-Name ${FRAPPE_SITE_NAME_HEADER};\n\
+        proxy_set_header Origin \$scheme://\$http_host;\n\
+        proxy_set_header Host \$http_host;\n\
+        proxy_pass http://frappe-socketio-server;\n\
+    }\n\
+    location / {\n\
+        rewrite ^(.+)/$ \$1 permanent;\n\
+        rewrite ^(.+)/index\\.html$ \$1 permanent;\n\
+        rewrite ^(.+)\\.html$ \$1 permanent;\n\
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n\
+        proxy_set_header X-Forwarded-Proto \$scheme;\n\
+        proxy_set_header X-Frappe-Site-Name ${FRAPPE_SITE_NAME_HEADER};\n\
+        proxy_set_header Host \$http_host;\n\
+        proxy_set_header X-Use-X-Accel-Redirect True;\n\
+        proxy_read_timeout ${PROXY_READ_TIMEOUT};\n\
+        proxy_redirect off;\n\
+        proxy_pass http://frappe-server;\n\
+    }\n\
+}\n\
+NGINX\n\
+\n\
+exec nginx -g "daemon off;"\n\
+' > /usr/local/bin/nginx-entrypoint.sh \
+    && chmod +x /usr/local/bin/nginx-entrypoint.sh
 
 # ── Clear sites dir so Docker can mount the named volume cleanly ──────────────
 RUN rm -rf /home/frappe/frappe-bench/sites \

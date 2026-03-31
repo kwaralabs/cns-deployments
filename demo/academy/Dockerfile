@@ -150,6 +150,11 @@ RUN useradd -ms /bin/bash frappe
 # ── Copy bench from builder ───────────────────────────────────────────────────
 COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
 
+# ── Clear sites dir so Docker can mount the named volume cleanly ──────────────
+RUN rm -rf /home/frappe/frappe-bench/sites \
+    && mkdir -p /home/frappe/frappe-bench/sites \
+    && chown frappe:frappe /home/frappe/frappe-bench/sites
+
 WORKDIR /home/frappe/frappe-bench
 
 USER frappe

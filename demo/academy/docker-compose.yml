@@ -1,40 +1,49 @@
 # ============================================================
-# ERPNext + Frappe LMS — Dokploy Compose
+# ERPNext + Frappe LMS — Frappe v16 — Dokploy Compose
 # Based on: github.com/frappe/frappe_docker
+#
+# Repo layout (all files must be co-located):
+#
+#   demo/academy/
+#   ├── docker-compose.yml   ← this file
+#   ├── Dockerfile
+#   └── apps.json
+#
+# Dokploy compose path:  demo/academy/docker-compose.yml
+# build context "."   → resolves to demo/academy/ ✅
 #
 # Deployment model:
 #   GitHub (private) ──webhook──▶ Dokploy ──build──▶ server
-#   Image is built ON the server. No registry involved.
+#   Image built ON the server. No registry push.
 #
-# All secrets and toggle vars are set in:
-#   Dokploy → Project → Environment Variables
-#   (never in the repo — .env is git-ignored)
+# Secrets/toggles → Dokploy → Project → Environment Variables
+# apps.json is read directly from the repo — no base64 needed.
 #
-# One-shot services are controlled by replica counts:
-#   CONFIGURE=1     → writes common_site_config.json (run once, then 0)
-#   CREATE_SITE=1   → creates site + installs apps   (run once, then 0)
-#   MIGRATE=1       → runs bench migrate              (on upgrades only)
-#   ENABLE_DB=1     → enables bundled MariaDB         (0 = external DB)
+# One-shot service toggles (replica counts):
+#   CONFIGURE=1    → writes common_site_config.json  (first deploy → then 0)
+#   CREATE_SITE=1  → creates site + installs apps    (first deploy → then 0)
+#   MIGRATE=1      → runs bench migrate               (after upgrades → then 0)
+#   ENABLE_DB=1    → runs bundled MariaDB             (0 = external DB)
 #
-# Typical first deploy:  CONFIGURE=1  CREATE_SITE=1  MIGRATE=0  ENABLE_DB=1
-# Subsequent deploys:    CONFIGURE=0  CREATE_SITE=0  MIGRATE=0  ENABLE_DB=1
-# After an upgrade:      CONFIGURE=0  CREATE_SITE=0  MIGRATE=1  ENABLE_DB=1
+# First deploy:    CONFIGURE=1  CREATE_SITE=1  MIGRATE=0  ENABLE_DB=1
+# Normal redeploy: CONFIGURE=0  CREATE_SITE=0  MIGRATE=0  ENABLE_DB=1
+# After upgrade:   CONFIGURE=0  CREATE_SITE=0  MIGRATE=1  ENABLE_DB=1
 # ============================================================
 
 x-custom-image: &custom_image
   build:
+    # "." = demo/academy/ (directory of this compose file) ✅
+    # Dockerfile and apps.json must be in the same folder as this file.
     context: .
     dockerfile: Dockerfile
     args:
       FRAPPE_PATH: ${FRAPPE_PATH:-https://github.com/frappe/frappe}
-      FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
-      PYTHON_VERSION: ${PYTHON_VERSION:-3.11.9}
-      NODE_VERSION: ${NODE_VERSION:-18.20.3}
-      # Base64-encoded apps.json — set this in Dokploy's env panel.
-      # Generate locally: base64 -w 0 apps.json  (Linux)
-      #                   base64 -i apps.json     (macOS)
-      APPS_JSON_BASE64: ${APPS_JSON_BASE64}
-  image: frappe-kwaralabs:${VERSION:-version-15}
+      FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-16}
+      PYTHON_VERSION: ${PYTHON_VERSION:-3.14.0}
+      NODE_VERSION: ${NODE_VERSION:-24.0.2}
+      # apps.json is copied directly from the build context (same directory
+      # as this compose file). Edit apps.json and push to add/remove apps.
+  image: frappe-kwaralabs:${VERSION:-version-16}
   pull_policy: never
   deploy:
     restart_policy:
@@ -43,8 +52,8 @@ x-custom-image: &custom_image
 services:
 
   # ── configurator ────────────────────────────────────────────
-  # Writes DB + Redis coordinates into common_site_config.json.
-  # Idempotent: skips if db_host is already present.
+  # Writes DB + Redis host/port into common_site_config.json.
+  # Idempotent: skips if db_host is already set.
   # Set CONFIGURE=1 on first deploy, then 0.
   configurator:
     <<: *custom_image
@@ -78,10 +87,9 @@ services:
       - bench-network
 
   # ── create-site ─────────────────────────────────────────────
-  # Creates the Frappe site and installs apps.
+  # Creates the Frappe site and installs apps defined in INSTALL_APP_ARGS.
   # Idempotent: skips if site directory already exists.
   # Set CREATE_SITE=1 on first deploy, then 0.
-  # Apps controlled by INSTALL_APP_ARGS env var.
   create-site:
     <<: *custom_image
     deploy:
@@ -127,7 +135,7 @@ services:
       - bench-network
 
   # ── migration ────────────────────────────────────────────────
-  # Runs bench migrate across all sites.
+  # Runs bench migrate across all sites (with maintenance mode).
   # Set MIGRATE=1 after image upgrades, then back to 0.
   migration:
     <<: *custom_image
@@ -149,7 +157,7 @@ services:
     networks:
       - bench-network
 
-  # ── backend ──────────────────────────────────────────────────
+  # ── backend (Gunicorn) ───────────────────────────────────────
   backend:
     <<: *custom_image
     depends_on:
@@ -167,7 +175,8 @@ services:
       retries: 30
 
   # ── frontend (Nginx) ─────────────────────────────────────────
-  # Exposed on HTTP_PUBLISH_PORT — Dokploy's Traefik routes here.
+  # Exposed on HTTP_PUBLISH_PORT (default 8080).
+  # Dokploy's built-in Traefik proxies this port → HTTPS.
   frontend:
     <<: *custom_image
     command: ["nginx-entrypoint.sh"]
@@ -287,8 +296,8 @@ services:
       timeout: 10s
       retries: 30
 
-  # ── MariaDB ──────────────────────────────────────────────────
-  # Set ENABLE_DB=0 if using an external DB server.
+  # ── MariaDB 10.6 ─────────────────────────────────────────────
+  # Set ENABLE_DB=0 to use an external DB instead.
   db:
     image: mariadb:10.6
     deploy:
@@ -314,8 +323,9 @@ services:
       retries: 20
 
   # ── Redis ─────────────────────────────────────────────────────
+  # Three separate instances: cache / queue / socketio
   redis-cache:
-    image: redis:6.2-alpine
+    image: redis:7-alpine
     deploy:
       restart_policy:
         condition: always
@@ -330,7 +340,7 @@ services:
       retries: 3
 
   redis-queue:
-    image: redis:6.2-alpine
+    image: redis:7-alpine
     deploy:
       restart_policy:
         condition: always
@@ -345,7 +355,7 @@ services:
       retries: 3
 
   redis-socketio:
-    image: redis:6.2-alpine
+    image: redis:7-alpine
     deploy:
       restart_policy:
         condition: always
@@ -365,8 +375,6 @@ volumes:
   redis-queue-data:
   redis-socketio-data:
   sites:
-    # Default: local named volume (fine for demo).
-    # For bind-mount or NFS, set SITE_VOLUME_TYPE / OPTS / DEV in Dokploy.
     driver_opts:
       type: ${SITE_VOLUME_TYPE:-none}
       o: ${SITE_VOLUME_OPTS:-bind}

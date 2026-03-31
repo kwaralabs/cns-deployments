@@ -1,33 +1,5 @@
 # ============================================================
 # ERPNext + Frappe LMS — Frappe v16 — Dokploy Compose
-# Based on: github.com/frappe/frappe_docker
-#
-# Repo layout (all files must be co-located):
-#
-#   demo/academy/
-#   ├── docker-compose.yml   ← this file
-#   ├── Dockerfile
-#   └── apps.json
-#
-# Dokploy compose path:  demo/academy/docker-compose.yml
-# build context "."   → resolves to demo/academy/ ✅
-#
-# Deployment model:
-#   GitHub (private) ──webhook──▶ Dokploy ──build──▶ server
-#   Image built ON the server. No registry push.
-#
-# Secrets/toggles → Dokploy → Project → Environment Variables
-# apps.json is read directly from the repo — no base64 needed.
-#
-# One-shot service toggles (replica counts):
-#   CONFIGURE=1    → writes common_site_config.json  (first deploy → then 0)
-#   CREATE_SITE=1  → creates site + installs apps    (first deploy → then 0)
-#   MIGRATE=1      → runs bench migrate               (after upgrades → then 0)
-#   ENABLE_DB=1    → runs bundled MariaDB             (0 = external DB)
-#
-# First deploy:    CONFIGURE=1  CREATE_SITE=1  MIGRATE=0  ENABLE_DB=1
-# Normal redeploy: CONFIGURE=0  CREATE_SITE=0  MIGRATE=0  ENABLE_DB=1
-# After upgrade:   CONFIGURE=0  CREATE_SITE=0  MIGRATE=1  ENABLE_DB=1
 # ============================================================
 
 x-custom-image: &custom_image
@@ -163,10 +135,10 @@ services:
       retries: 30
 
   # ── frontend (Nginx) ─────────────────────────────────────────
-  # Uses the official frappe nginx image which includes nginx-entrypoint.sh.
-  # Your custom image handles backend/workers; nginx is a separate concern.
   frontend:
-    image: frappe/frappe-nginx:version-16
+    <<: *custom_image
+    user: root
+    command: ["nginx-entrypoint.sh"]
     depends_on:
       backend:
         condition: service_started

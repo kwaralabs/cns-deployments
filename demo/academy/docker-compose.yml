@@ -163,9 +163,10 @@ services:
       retries: 30
 
   # ── frontend (Nginx) ─────────────────────────────────────────
+  # Uses the official frappe nginx image which includes nginx-entrypoint.sh.
+  # Your custom image handles backend/workers; nginx is a separate concern.
   frontend:
-    <<: *custom_image
-    command: ["nginx-entrypoint.sh"]
+    image: frappe/frappe-nginx:version-16
     depends_on:
       backend:
         condition: service_started

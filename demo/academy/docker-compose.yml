@@ -32,8 +32,6 @@
 
 x-custom-image: &custom_image
   build:
-    # "." = demo/academy/ (directory of this compose file) ✅
-    # Dockerfile and apps.json must be in the same folder as this file.
     context: .
     dockerfile: Dockerfile
     args:
@@ -41,8 +39,6 @@ x-custom-image: &custom_image
       FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-16}
       PYTHON_VERSION: ${PYTHON_VERSION:-3.14.0}
       NODE_VERSION: ${NODE_VERSION:-24.0.2}
-      # apps.json is copied directly from the build context (same directory
-      # as this compose file). Edit apps.json and push to add/remove apps.
   image: frappe-kwaralabs:${VERSION:-version-16}
   pull_policy: never
   deploy:
@@ -52,9 +48,6 @@ x-custom-image: &custom_image
 services:
 
   # ── configurator ────────────────────────────────────────────
-  # Writes DB + Redis host/port into common_site_config.json.
-  # Idempotent: skips if db_host is already set.
-  # Set CONFIGURE=1 on first deploy, then 0.
   configurator:
     <<: *custom_image
     deploy:
@@ -87,9 +80,6 @@ services:
       - bench-network
 
   # ── create-site ─────────────────────────────────────────────
-  # Creates the Frappe site and installs apps defined in INSTALL_APP_ARGS.
-  # Idempotent: skips if site directory already exists.
-  # Set CREATE_SITE=1 on first deploy, then 0.
   create-site:
     <<: *custom_image
     deploy:
@@ -135,8 +125,6 @@ services:
       - bench-network
 
   # ── migration ────────────────────────────────────────────────
-  # Runs bench migrate across all sites (with maintenance mode).
-  # Set MIGRATE=1 after image upgrades, then back to 0.
   migration:
     <<: *custom_image
     deploy:
@@ -175,8 +163,6 @@ services:
       retries: 30
 
   # ── frontend (Nginx) ─────────────────────────────────────────
-  # Exposed on HTTP_PUBLISH_PORT (default 8080).
-  # Dokploy's built-in Traefik proxies this port → HTTPS.
   frontend:
     <<: *custom_image
     command: ["nginx-entrypoint.sh"]
@@ -297,7 +283,6 @@ services:
       retries: 30
 
   # ── MariaDB 10.6 ─────────────────────────────────────────────
-  # Set ENABLE_DB=0 to use an external DB instead.
   db:
     image: mariadb:10.6
     deploy:
@@ -323,7 +308,6 @@ services:
       retries: 20
 
   # ── Redis ─────────────────────────────────────────────────────
-  # Three separate instances: cache / queue / socketio
   redis-cache:
     image: redis:7-alpine
     deploy:
@@ -375,10 +359,6 @@ volumes:
   redis-queue-data:
   redis-socketio-data:
   sites:
-    driver_opts:
-      type: ${SITE_VOLUME_TYPE:-none}
-      o: ${SITE_VOLUME_OPTS:-bind}
-      device: ${SITE_VOLUME_DEV:-./sites}
 
 networks:
   bench-network:

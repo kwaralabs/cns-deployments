@@ -79,6 +79,10 @@ APPS_JSON='[
     "branch": "version-16"
   },
   {
+    "url": "https://github.com/frappe/payments",
+    "branch": "version-16"
+  },
+  {
     "url": "https://github.com/frappe/lms",
     "branch": "main"
   }

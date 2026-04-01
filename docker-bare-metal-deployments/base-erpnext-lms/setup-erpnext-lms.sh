@@ -62,10 +62,10 @@ set -euo pipefail
 # CONFIGURATION — EDIT THESE
 ###############################################################################
 
-SITE_DOMAIN="boujeeboyzjerky.collabnscale.io"
-TRAEFIK_DOMAIN="traefik.cns-srv1.collabnscale.com"
+SITE_DOMAIN="academy-demo.helveza.com"
+TRAEFIK_DOMAIN="academy-demo.traefik.helveza.com"
 LETSENCRYPT_EMAIL="admin@collabnscale.com"
-PROJECT_NAME="boujeeboyz-one"
+PROJECT_NAME="academy-one"
 IMAGE_NAME="customapp"
 IMAGE_TAG="1.0.0"
 FRAPPE_BRANCH="version-16"

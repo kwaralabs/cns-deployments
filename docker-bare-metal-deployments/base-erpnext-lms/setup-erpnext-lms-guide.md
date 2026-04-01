@@ -6,7 +6,7 @@ To use on a freshly reset VPS. As root on the fresh VPS:
 apt-get update && apt-get install -y curl
 ```
 ```
-curl -o setup.sh ''
+curl -o setup.sh 'https://raw.githubusercontent.com/kwaralabs/cns-deployments/refs/heads/main/docker-bare-metal-deployments/base-erpnext-lms/setup-erpnext-lms.sh'
 ```
 ```
 chmod +x setup.sh

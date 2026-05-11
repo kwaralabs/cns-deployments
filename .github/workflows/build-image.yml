@@ -1,106 +1,97 @@
-name: Build and push Frappe base image
+name: Build & Push Frappe Image
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
     paths:
-      # Only rebuild when something that affects the image changes
-      - "Dockerfile"
+      - "images/frappe/**"
       - "apps.json"
+      - "Dockerfile"
       - ".github/workflows/build-image.yml"
   workflow_dispatch:
     inputs:
-      push_tag:
-        description: "Image tag to build and push (e.g. v16.1.0-r1)"
-        required: false
-        default: "dev-v16"
+      push_latest:
+        description: "Also tag as :latest"
+        type: boolean
+        default: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/kwaralabs/frappe-base
+  IMAGE_NAME: ${{ github.repository_owner }}/cns
 
 jobs:
   build-and-push:
+    name: Build & Push
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write   # required to push to GHCR
+      packages: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Generate APPS_JSON_BASE64 from apps.json ──────────────────────────
-      # This is the official frappe_docker pattern. The Dockerfile decodes
-      # this arg and passes it to bench init --apps_path.
-      - name: Encode apps.json as base64
-        id: apps_json
-        run: |
-          APPS_JSON_BASE64=$(base64 -w 0 apps.json)
-          echo "value=${APPS_JSON_BASE64}" >> $GITHUB_OUTPUT
-          echo "apps.json contents:"
-          cat apps.json
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # ── Resolve image tag ─────────────────────────────────────────────────
-      # On push to main: use short SHA → dev-v16-<sha>
-      # On manual dispatch with push_tag: use that tag exactly
-      - name: Resolve image tag
-        id: tag
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.push_tag }}" ]]; then
-            TAG="${{ inputs.push_tag }}"
-          else
-            TAG="dev-v16-${{ github.sha }}"
-            TAG="${TAG:0:20}"
-          fi
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Building tag: ${TAG}"
-
-      # ── Log in to GHCR ────────────────────────────────────────────────────
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Set up Docker Buildx (required for multi-platform and cache) ──────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Generate APPS_JSON_BASE64
+        id: apps_json
+        run: echo "APPS_JSON_BASE64=$(base64 -w 0 apps.json)" >> $GITHUB_OUTPUT
 
-      # ── Build and push ────────────────────────────────────────────────────
-      # Cache layers in GHCR to speed up subsequent builds.
-      # The image is built once here and pulled by Dokploy — never rebuilt there.
-      - name: Build and push image
-        uses: docker/build-push-action@v6
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || inputs.push_latest == true }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: images/frappe/Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-16
             PYTHON_VERSION=3.14
             NODE_VERSION=24
-            APPS_JSON_BASE64=${{ steps.apps_json.outputs.value }}
-          # Layer cache stored in GHCR — dramatically speeds up rebuilds
-          # when only apps.json changes (Python/Node/bench layers are reused)
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
+            APPS_JSON_BASE64=${{ steps.apps_json.outputs.APPS_JSON_BASE64 }}
+          platforms: linux/amd64
 
-      # ── Print deploy instructions ─────────────────────────────────────────
-      - name: Print Dokploy deploy instruction
+      - name: Image digest
+        run: echo "Pushed ${{ steps.meta.outputs.tags }}"
+
+  validate-compose:
+    name: Validate all brand compose files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose files
         run: |
-          echo ""
-          echo "════════════════════════════════════════════════════════"
-          echo "Image built and pushed successfully."
-          echo ""
-          echo "Update IMAGE_TAG in Dokploy environment:"
-          echo "  IMAGE_TAG=${{ steps.tag.outputs.tag }}"
-          echo ""
-          echo "Then redeploy the BrazenHalo application in Dokploy."
-          echo "════════════════════════════════════════════════════════"
+          for f in brands/*/docker-compose.yml; do
+            echo "Validating $f ..."
+            # Use a dummy env so required vars don't block validation
+            env $(cat brands/$(basename $(dirname $f))/.env.example | grep -v '^#' | grep '=' | sed 's/=.*/=placeholder/' | xargs) \
+              docker compose -f "$f" config --quiet && echo "  OK: $f" || echo "  FAIL: $f"
+          done

@@ -1,72 +1,92 @@
 # =============================================================================
 # ERPNext — BrazenHalo
 # Brand:        BRAZENHALO
-# Managed by:   Dokploy (Git source, Dockerfile build)
-# Reference:    Dokploy ERPNext compose pattern
+# VPS:          Dedicated — no port collision concerns
+# Managed by:   Dokploy (this file path: brands/brazenhalo/docker-compose.yml)
+# Image:        ghcr.io/kwaralabs/frappe-cns  (shared with all brands)
 #
-# HOW THIS WORKS IN DOKPLOY:
-#   Dokploy pulls this file from Git and builds the image from ./Dockerfile
-#   using the build args defined in the Dokploy Build tab.
-#   All [SECRET] variables are set in Dokploy's Environment tab.
+# ─── OPERATION TOGGLES ───────────────────────────────────────────────────────
+#   CONFIGURE=1           → writes common_site_config.json  (first deploy only)
+#   REGENERATE_APPS_TXT=1 → rewrites sites/apps.txt         (first deploy only)
+#   CREATE_SITE=1         → creates site + installs apps    (first deploy only)
+#   MIGRATE=1             → runs bench migrate               (on upgrades)
+#   ENABLE_DB=1           → starts MariaDB                  (always 1)
 #
-# ONE-SHOT OPERATIONS (scale to 1 in Dokploy UI, then back to 0):
-#   CONFIGURE=1   → writes common_site_config.json (run once after first deploy)
-#   CREATE_SITE=1 → creates the Frappe site and installs apps (run once)
-#   MIGRATE=1     → runs bench migrate across all sites (run on upgrades)
-#   ENABLE_DB=1   → starts the MariaDB container (set permanently for local DB)
+# ─── FIRST DEPLOY ────────────────────────────────────────────────────────────
+#   Set all toggles to 1. After one-shot services complete, set back to 0
+#   (except ENABLE_DB — leave at 1 permanently).
 #
-# FIRST DEPLOY — set all toggles to 1 simultaneously (mirrors Dokploy template):
-#   ENABLE_DB=1  CONFIGURE=1  REGENERATE_APPS_TXT=1  CREATE_SITE=1  MIGRATE=1
-#   Services are idempotent — running them together on a fresh stack is safe.
-#   After first boot completes, set CONFIGURE, REGENERATE_APPS_TXT,
-#   CREATE_SITE, and MIGRATE back to 0. Leave ENABLE_DB=1.
+# ─── UPGRADE ─────────────────────────────────────────────────────────────────
+#   1. Update IMAGE_TAG in Dokploy Environment tab → Redeploy
+#   2. Set MIGRATE=1 → Redeploy
+#   3. Set MIGRATE=0 → Redeploy
 #
-# UPGRADE SEQUENCE:
-#   1. Update IMAGE_TAG in Dokploy Build tab, redeploy (pulls new image)
-#   2. Set MIGRATE=1, redeploy → migrations run across all sites
-#   3. Set MIGRATE=0, redeploy → back to normal
+# ─── DOKPLOY DOMAIN ──────────────────────────────────────────────────────────
+#   Domains tab → erp.brazenhalo.com → port 8080 → HTTPS (Let's Encrypt)
 # =============================================================================
 
-x-custom-image: &custom_image
-  image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-base}:${IMAGE_TAG:-latest}
+x-image: &image
+  image: ${IMAGE_NAME:-ghcr.io/kwaralabs/frappe-cns}:${IMAGE_TAG:-latest}
   pull_policy: ${PULL_POLICY:-always}
-  deploy:
-    restart_policy:
-      condition: always
+  restart: unless-stopped
+
+x-depends-configurator: &depends_configurator
+  configurator:
+    condition: service_completed_successfully
+    required: true
+
+x-depends-redis: &depends_redis
+  redis-cache:
+    condition: service_healthy
+    required: true
+  redis-queue:
+    condition: service_healthy
+    required: true
+
+x-volumes: &volumes
+  - sites:/home/frappe/frappe-bench/sites
+  - logs:/home/frappe/frappe-bench/logs
+
+x-network: &network
+  - bench-network
 
 services:
 
-  # ---------------------------------------------------------------------------
-  # BACKEND — Gunicorn WSGI server
-  # ---------------------------------------------------------------------------
+  # ── BACKEND — Gunicorn WSGI ────────────────────────────────────────────────
   backend:
-    <<: *custom_image
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+    <<: *image
+    command:
+      - bench
+      - serve
+      - --port
+      - "8000"
+    depends_on:
+      <<: *depends_configurator
+      db:
+        condition: service_healthy
+        required: true
+    environment:
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-}
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "0.0.0.0:8000"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "0.0.0.0:8000"]
+      interval: 10s
       timeout: 10s
-      retries: 30
+      retries: 15
+      start_period: 30s
 
-  # ---------------------------------------------------------------------------
-  # FRONTEND — Nginx reverse proxy
-  # ---------------------------------------------------------------------------
+  # ── FRONTEND — Nginx reverse proxy ────────────────────────────────────────
   frontend:
-    <<: *custom_image
+    <<: *image
     command:
       - nginx-entrypoint.sh
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
         required: true
       websocket:
-        condition: service_started
+        condition: service_healthy
         required: true
     environment:
       BACKEND: backend:8000
@@ -75,153 +95,108 @@ services:
       UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
       UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
       UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
-      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
-      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-300}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-100m}
+    volumes: *volumes
     ports:
       - "${FRONTEND_PORT:-8080}:8080"
-    networks:
-      - bench-network
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "0.0.0.0:8080"
-      interval: 2s
-      timeout: 30s
-      retries: 30
+      test: ["CMD", "wait-for-it", "--timeout=5", "0.0.0.0:8080"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
 
-  # ---------------------------------------------------------------------------
-  # WEBSOCKET — Node.js Socket.IO server
-  # ---------------------------------------------------------------------------
+  # ── WEBSOCKET — Node.js Socket.IO ─────────────────────────────────────────
   websocket:
-    <<: *custom_image
+    <<: *image
     command:
       - node
       - /home/frappe/frappe-bench/apps/frappe/socketio.js
     depends_on:
-      configurator:
-        condition: service_completed_successfully
-        required: true
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      <<: *depends_configurator
+      <<: *depends_redis
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "0.0.0.0:9000"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "0.0.0.0:9000"]
+      interval: 10s
       timeout: 10s
-      retries: 30
+      retries: 15
+      start_period: 20s
 
-  # ---------------------------------------------------------------------------
-  # SCHEDULER — Frappe task scheduler
-  # ---------------------------------------------------------------------------
+  # ── SCHEDULER ──────────────────────────────────────────────────────────────
   scheduler:
-    <<: *custom_image
+    <<: *image
     command:
       - bench
       - schedule
     depends_on:
-      configurator:
-        condition: service_completed_successfully
+      <<: *depends_configurator
+      <<: *depends_redis
+      backend:
+        condition: service_healthy
         required: true
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "redis-queue:6379"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "redis-queue:6379"]
+      interval: 15s
       timeout: 10s
-      retries: 30
+      retries: 10
+      start_period: 30s
 
-  # ---------------------------------------------------------------------------
-  # QUEUE WORKERS
-  # ---------------------------------------------------------------------------
+  # ── QUEUE WORKERS ──────────────────────────────────────────────────────────
   queue-default:
-    <<: *custom_image
-    command:
-      - bench
-      - worker
-      - --queue
-      - default
+    <<: *image
+    command: ["bench", "worker", "--queue", "default"]
     depends_on:
-      configurator:
-        condition: service_completed_successfully
-        required: true
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      <<: *depends_configurator
+      <<: *depends_redis
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "redis-queue:6379"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "redis-queue:6379"]
+      interval: 15s
       timeout: 10s
-      retries: 30
+      retries: 10
+      start_period: 30s
 
   queue-short:
-    <<: *custom_image
-    command:
-      - bench
-      - worker
-      - --queue
-      - short
+    <<: *image
+    command: ["bench", "worker", "--queue", "short"]
     depends_on:
-      configurator:
-        condition: service_completed_successfully
-        required: true
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      <<: *depends_configurator
+      <<: *depends_redis
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "redis-queue:6379"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "redis-queue:6379"]
+      interval: 15s
       timeout: 10s
-      retries: 30
+      retries: 10
+      start_period: 30s
 
   queue-long:
-    <<: *custom_image
-    command:
-      - bench
-      - worker
-      - --queue
-      - long
+    <<: *image
+    command: ["bench", "worker", "--queue", "long"]
     depends_on:
-      configurator:
-        condition: service_completed_successfully
-        required: true
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      <<: *depends_configurator
+      <<: *depends_redis
+    volumes: *volumes
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - wait-for-it
-        - "redis-queue:6379"
-      interval: 2s
+      test: ["CMD", "wait-for-it", "--timeout=5", "redis-queue:6379"]
+      interval: 15s
       timeout: 10s
-      retries: 30
+      retries: 10
+      start_period: 30s
 
-  # ---------------------------------------------------------------------------
-  # CONFIGURATOR — one-shot config writer
-  # ---------------------------------------------------------------------------
+  # ── CONFIGURATOR — one-shot ────────────────────────────────────────────────
   configurator:
-    <<: *custom_image
+    <<: *image
+    restart: "no"
     deploy:
       mode: replicated
       replicas: ${CONFIGURE:-0}
@@ -229,15 +204,25 @@ services:
         condition: none
     entrypoint: ["bash", "-c"]
     command:
-      - >
-        [[ $${REGENERATE_APPS_TXT} == "1" ]] && ls -1 apps > sites/apps.txt;
-        [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && exit 0;
-        bench set-config -g db_host $$DB_HOST;
-        bench set-config -gp db_port $$DB_PORT;
-        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
-        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
-        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
-        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+      - |
+        set -euo pipefail
+        if [[ "${REGENERATE_APPS_TXT:-0}" == "1" ]]; then
+          echo "[configurator] Regenerating sites/apps.txt ..."
+          ls -1 apps > sites/apps.txt
+        fi
+        EXISTING=$(grep -hs ^ sites/common_site_config.json | jq -r '.db_host // empty' 2>/dev/null || true)
+        if [[ -n "$EXISTING" ]]; then
+          echo "[configurator] Already configured. Skipping."
+          exit 0
+        fi
+        echo "[configurator] Writing common_site_config.json ..."
+        bench set-config -g db_host "$DB_HOST"
+        bench set-config -gp db_port "$DB_PORT"
+        bench set-config -g redis_cache "redis://$REDIS_CACHE"
+        bench set-config -g redis_queue "redis://$REDIS_QUEUE"
+        bench set-config -g redis_socketio "redis://$REDIS_QUEUE"
+        bench set-config -gp socketio_port "$SOCKETIO_PORT"
+        echo "[configurator] Done."
     environment:
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-3306}
@@ -245,16 +230,13 @@ services:
       REDIS_QUEUE: redis-queue:6379
       SOCKETIO_PORT: "9000"
       REGENERATE_APPS_TXT: ${REGENERATE_APPS_TXT:-0}
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+    volumes: *volumes
+    networks: *network
 
-  # ---------------------------------------------------------------------------
-  # CREATE-SITE — one-shot site creation + app installation
-  # ---------------------------------------------------------------------------
+  # ── CREATE-SITE — one-shot ────────────────────────────────────────────────
   create-site:
-    <<: *custom_image
+    <<: *image
+    restart: "no"
     deploy:
       mode: replicated
       replicas: ${CREATE_SITE:-0}
@@ -262,47 +244,57 @@ services:
         condition: none
     entrypoint: ["bash", "-c"]
     command:
-      - >
-        wait-for-it -t 120 $$DB_HOST:$$DB_PORT;
-        wait-for-it -t 120 redis-cache:6379;
-        wait-for-it -t 120 redis-queue:6379;
-        export start=`date +%s`;
-        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] &&
-          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] &&
-          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
-        do
-          echo "Waiting for sites/common_site_config.json ...";
-          sleep 5;
-          if (( `date +%s`-start > 120 )); then
-            echo "Timed out waiting for common_site_config.json";
-            exit 1;
-          fi
-        done;
-        [[ -d "sites/$${SITE_NAME}" ]] && echo "$${SITE_NAME} already exists" && exit 0;
+      - |
+        set -euo pipefail
+        echo "[create-site] Waiting for infrastructure ..."
+        wait-for-it -t 120 "$DB_HOST:$DB_PORT"
+        wait-for-it -t 120 redis-cache:6379
+        wait-for-it -t 120 redis-queue:6379
+
+        start=$(date +%s)
+        while true; do
+          db_h=$(grep -hs ^ sites/common_site_config.json | jq -r '.db_host // empty' 2>/dev/null || true)
+          rc=$(grep -hs ^ sites/common_site_config.json | jq -r '.redis_cache // empty' 2>/dev/null || true)
+          rq=$(grep -hs ^ sites/common_site_config.json | jq -r '.redis_queue // empty' 2>/dev/null || true)
+          [[ -n "$db_h" && -n "$rc" && -n "$rq" ]] && break
+          echo "[create-site] Waiting for common_site_config.json ..."
+          sleep 5
+          (( $(date +%s) - start > 120 )) && echo "ERROR: timed out" >&2 && exit 1
+        done
+
+        if [[ -d "sites/$SITE_NAME" ]]; then
+          echo "[create-site] Site '$SITE_NAME' already exists. Skipping."
+          exit 0
+        fi
+
+        echo "[create-site] Creating site: $SITE_NAME ..."
         bench new-site \
           --mariadb-user-host-login-scope='%' \
-          --admin-password=$${ADMIN_PASSWORD} \
+          --admin-password="$ADMIN_PASSWORD" \
           --db-root-username=root \
-          --db-root-password=$${DB_ROOT_PASSWORD} \
-          $${INSTALL_APP_ARGS} \
-          $${SITE_NAME};
+          --db-root-password="$DB_ROOT_PASSWORD" \
+          $INSTALL_APP_ARGS \
+          "$SITE_NAME"
+        echo "[create-site] Done."
+    depends_on:
+      <<: *depends_configurator
+      db:
+        condition: service_healthy
+        required: true
     environment:
-      SITE_NAME: ${SITE_NAME:-erp.brazenhalo.com}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in Dokploy}
+      SITE_NAME: ${SITE_NAME:?SITE_NAME must be set}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-3306}
-      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
-      INSTALL_APP_ARGS: ${INSTALL_APP_ARGS:---install-app erpnext}
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set}
+      INSTALL_APP_ARGS: ${INSTALL_APP_ARGS:---install-app erpnext --install-app hrms --install-app crm}
+    volumes: *volumes
+    networks: *network
 
-  # ---------------------------------------------------------------------------
-  # MIGRATION — one-shot bench migrate runner
-  # ---------------------------------------------------------------------------
+  # ── MIGRATION — one-shot ──────────────────────────────────────────────────
   migration:
-    <<: *custom_image
+    <<: *image
+    restart: "no"
     deploy:
       mode: replicated
       replicas: ${MIGRATE:-0}
@@ -310,22 +302,28 @@ services:
         condition: none
     entrypoint: ["bash", "-c"]
     command:
-      - >
-        bench --site all set-config -p maintenance_mode 1;
-        bench --site all set-config -p pause_scheduler 1;
-        bench --site all migrate;
-        bench --site all set-config -p maintenance_mode 0;
-        bench --site all set-config -p pause_scheduler 0;
-    volumes:
-      - sites:/home/frappe/frappe-bench/sites
-    networks:
-      - bench-network
+      - |
+        set -euo pipefail
+        echo "[migration] Enabling maintenance mode ..."
+        bench --site all set-config -p maintenance_mode 1
+        bench --site all set-config -p pause_scheduler 1
+        echo "[migration] Running migrations ..."
+        bench --site all migrate
+        echo "[migration] Disabling maintenance mode ..."
+        bench --site all set-config -p maintenance_mode 0
+        bench --site all set-config -p pause_scheduler 0
+        echo "[migration] Done."
+    depends_on:
+      db:
+        condition: service_healthy
+        required: true
+    volumes: *volumes
+    networks: *network
 
-  # ---------------------------------------------------------------------------
-  # MARIADB
-  # ---------------------------------------------------------------------------
+  # ── MARIADB 11.8 ──────────────────────────────────────────────────────────
   db:
-    image: mariadb:10.6
+    image: mariadb:11.8
+    restart: unless-stopped
     deploy:
       mode: replicated
       replicas: ${ENABLE_DB:-1}
@@ -335,36 +333,39 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
-      - --skip-innodb-read-only-compressed
-      - --innodb-buffer-pool-size=${MARIADB_INNODB_BUFFER_POOL_SIZE:-512M}
+      - --innodb-buffer-pool-size=${MARIADB_INNODB_BUFFER_POOL_SIZE:-2G}
       - --innodb-log-file-size=256M
+      - --innodb-flush-log-at-trx-commit=2
       - --max-allowed-packet=64M
       - --wait-timeout=28800
       - --interactive-timeout=28800
+      - --max-connections=${MARIADB_MAX_CONNECTIONS:-200}
+      - --slow-query-log=1
+      - --slow-query-log-file=/var/log/mysql/slow.log
+      - --long-query-time=2
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in Dokploy}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set}
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_ROOT_HOST: "%"
     volumes:
       - db-data:/var/lib/mysql
-    networks:
-      - bench-network
+      - db-logs:/var/log/mysql
+    networks: *network
     healthcheck:
-      test: mysqladmin ping -h localhost --password=${DB_ROOT_PASSWORD}
-      interval: 1s
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 5s
+      timeout: 5s
       retries: 20
+      start_period: 30s
 
-  # ---------------------------------------------------------------------------
-  # REDIS — CACHE
-  # ---------------------------------------------------------------------------
+  # ── REDIS — CACHE ─────────────────────────────────────────────────────────
   redis-cache:
-    image: redis:6.2-alpine
-    deploy:
-      restart_policy:
-        condition: always
+    image: redis:7.2-alpine
+    restart: unless-stopped
     command:
       - redis-server
       - --maxmemory
-      - ${REDIS_CACHE_MAXMEMORY:-256mb}
+      - ${REDIS_CACHE_MAXMEMORY:-512mb}
       - --maxmemory-policy
       - allkeys-lru
       - --save
@@ -373,77 +374,72 @@ services:
       - "no"
     volumes:
       - redis-cache-data:/data
-    networks:
-      - bench-network
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - redis-cli
-        - ping
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 10
+      start_period: 10s
 
-  # ---------------------------------------------------------------------------
-  # REDIS — QUEUE
-  # ---------------------------------------------------------------------------
+  # ── REDIS — QUEUE (durable, AOF) ──────────────────────────────────────────
   redis-queue:
-    image: redis:6.2-alpine
-    deploy:
-      restart_policy:
-        condition: always
+    image: redis:7.2-alpine
+    restart: unless-stopped
     command:
       - redis-server
       - --maxmemory
-      - ${REDIS_QUEUE_MAXMEMORY:-128mb}
+      - ${REDIS_QUEUE_MAXMEMORY:-256mb}
       - --maxmemory-policy
       - noeviction
       - --appendonly
       - "yes"
       - --appendfilename
       - appendonly.aof
+      - --appendfsync
+      - everysec
     volumes:
       - redis-queue-data:/data
-    networks:
-      - bench-network
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - redis-cli
-        - ping
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 10
+      start_period: 10s
 
-  # ---------------------------------------------------------------------------
-  # REDIS — SOCKETIO
-  # ---------------------------------------------------------------------------
+  # ── REDIS — SOCKETIO ──────────────────────────────────────────────────────
   redis-socketio:
-    image: redis:6.2-alpine
-    deploy:
-      restart_policy:
-        condition: always
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_SOCKETIO_MAXMEMORY:-64mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     volumes:
       - redis-socketio-data:/data
-    networks:
-      - bench-network
+    networks: *network
     healthcheck:
-      test:
-        - CMD
-        - redis-cli
-        - ping
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 10
+      start_period: 10s
 
 # =============================================================================
-# VOLUMES
-# All plain named volumes — Docker manages storage locations automatically.
-# No host path dependencies, works on any Dokploy server out of the box.
+# VOLUMES — prefixed bh- to avoid collisions if ever migrated to shared host
 # =============================================================================
 volumes:
   db-data:
     name: bh-db-data
+  db-logs:
+    name: bh-db-logs
   redis-cache-data:
     name: bh-redis-cache-data
   redis-queue-data:
@@ -452,6 +448,8 @@ volumes:
     name: bh-redis-socketio-data
   sites:
     name: bh-sites
+  logs:
+    name: bh-logs
 
 # =============================================================================
 # NETWORKS

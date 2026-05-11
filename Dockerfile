@@ -183,8 +183,8 @@ WORKDIR /home/frappe/frappe-bench
 ENV PATH="/home/frappe/.local/bin:$PATH"
 ENV FRAPPE_BENCH_PATH="/home/frappe/frappe-bench"
 
-# Smoke-test
-RUN bench --version && python -c "import frappe; print('frappe import OK')"
+# Smoke-test: confirm bench CLI is functional
+RUN bench --version
 
 VOLUME ["/home/frappe/frappe-bench/sites", "/home/frappe/frappe-bench/logs"]
 

@@ -7,9 +7,9 @@ on:
     tags:
       - "v*.*.*"
     paths:
-      - "images/frappe/**"
-      - "apps.json"
       - "Dockerfile"
+      - "entrypoints/**"
+      - "apps.json"
       - ".github/workflows/build-image.yml"
   workflow_dispatch:
     inputs:
@@ -20,7 +20,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/cns
+  IMAGE_NAME: ${{ github.repository_owner }}/frappe-cns
 
 jobs:
   build-and-push:
@@ -63,7 +63,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: images/frappe/Dockerfile
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -90,8 +90,10 @@ jobs:
       - name: Validate compose files
         run: |
           for f in brands/*/docker-compose.yml; do
+            brand=$(basename $(dirname $f))
             echo "Validating $f ..."
-            # Use a dummy env so required vars don't block validation
-            env $(cat brands/$(basename $(dirname $f))/.env.example | grep -v '^#' | grep '=' | sed 's/=.*/=placeholder/' | xargs) \
-              docker compose -f "$f" config --quiet && echo "  OK: $f" || echo "  FAIL: $f"
+            env $(grep -v '^#' brands/$brand/.env.example | grep '=' | sed 's/=.*/=placeholder/' | xargs) \
+              docker compose -f "$f" config --quiet \
+              && echo "  OK: $f" \
+              || echo "  FAIL: $f"
           done

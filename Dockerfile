@@ -160,7 +160,7 @@ COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe
 COPY --from=builder --chown=frappe:frappe /home/frappe/.local /home/frappe/.local
 
 # Entrypoint scripts (nginx-entrypoint.sh lives here)
-COPY --chown=root:root images/frappe/entrypoints/ /usr/local/bin/
+COPY --chown=root:root entrypoints/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 
 USER frappe

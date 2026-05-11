@@ -109,9 +109,23 @@ RUN export APP_INSTALL_ARGS="" && \
 
 WORKDIR /home/frappe/frappe-bench
 
-# Write empty common_site_config.json — required by bench at runtime.
-# The configurator service fills in actual values on first deploy.
-RUN echo "{}" > sites/common_site_config.json
+# Write a build-time common_site_config.json.
+#
+# CRM's frontend (src/socket.js) imports `socketio_port` from this file as a
+# named ES module export at Vite build time — NOT at runtime. If the key is
+# missing the build hard-fails with:
+#   "socketio_port" is not exported by "common_site_config.json"
+#
+# All values here are build-time placeholders only. The configurator service
+# overwrites this file with real values on first deploy.
+RUN echo '{ \
+  "db_host": "db", \
+  "db_port": 3306, \
+  "redis_cache": "redis://redis-cache:6379", \
+  "redis_queue": "redis://redis-queue:6379", \
+  "redis_socketio": "redis://redis-queue:6379", \
+  "socketio_port": 9000 \
+}' > sites/common_site_config.json
 
 # Strip .git directories — saves several hundred MB of image size.
 RUN find apps -mindepth 1 -path "*/.git" -type d | xargs rm -rf
